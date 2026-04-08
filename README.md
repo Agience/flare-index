@@ -46,7 +46,7 @@ The showcase runs against the real FLARE stack — Shamir K=2-of-M=3 threshold o
 ## What the system implements
 
 - **Per-cell HKDF + AES-256-GCM** encryption with `(context_id || cluster_id)` AAD binding
-- **Per-context FAISS k-means** partitioning; centroids public, cells encrypted at rest in the storage service
+- **Per-context FAISS k-means** partitioning; centroids currently public in the storage service (near-term mitigation: store encrypted on the ledger, deliver inside the oracle key-issuance response — see §7 of the paper), cells encrypted at rest
 - **Multi-process services**: `flare/ledger/`, `flare/storage/`, `flare/oracle/`, each a FastAPI app
 - **Multi-method DID identities** (`flare/identity.py`): `did:key` (local) + `did:web` (HTTPS fetch + cache) via a unified `DIDResolver`
 - **Authenticated, confidential, end-to-end-bound batch wire protocol** (`flare/wire.py`):
@@ -93,7 +93,7 @@ The showcase runs against the real FLARE stack — Shamir K=2-of-M=3 threshold o
 | Per-process nonce caches | Operational concern; production shares state via a coordination service |
 | TTL relies on coordinated wall-clock time | Operational; assumes NTP |
 | Failover order is deterministic (registration order) | F-1 in `security.md` |
-| Centroid topology leakage | Calibration research, deliberately not half-implemented |
+| Centroid topology leakage | Near-term mitigation designed: store centroids encrypted on the ledger, deliver inside oracle key-issuance response (no extra round-trip). Not yet implemented. |
 | Token incentives + slashing | Out of scope for the cryptographic prototype |
 | Forward illumination via a learned predictive model | The deterministic padding covers the same security shape |
 | ~18× warm-path overhead vs plaintext (129× cold) | Query-node caching (routing, ciphertext, cell-key) cuts 103 ms → 8.4 ms; residual is FastAPI/JSON process-boundary cost. Real-datacenter deployment expected 2–4 ms/query |
