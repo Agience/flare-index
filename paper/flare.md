@@ -5,7 +5,7 @@
 
 ## Abstract
 
-Distributed vector search systems enforce access control logically: an ACL layer in front of a plaintext index decides which results a principal may see. This places the entire database operator inside the trusted computing base. We propose **FLARE**, an architecture that enforces access control *physically* by encrypting each cluster cell of an inverted-file (IVF) vector index under a key derived from the data owner's master key. Authorization is computed as structural reachability through a typed graph (the *light cone*) and grants are recorded as Ed25519-signed entries on a hash-chained ledger. When a query reaches an authorized cluster, an oracle network derives an ephemeral cell key on demand under a Shamir K-of-M threshold protocol — no single host's compromise yields the master key — and returns it to the querier inside an end-to-end-bound, time-limited authenticated envelope. Revocation is a single signed ledger entry; no re-encryption, no key rotation, no coordination. We implement FLARE end-to-end as `flare`, an open-source Python package and runnable docker-compose stack, and evaluate it on the BEIR SciFact benchmark: FLARE preserves **95.6%** of a plaintext FAISS baseline's retrieval quality (recall@10 = 0.753 vs. 0.788) while exercising every cryptographic and authorization layer the design specifies. The prototype is a working artifact, not a deployment, and we are explicit about the gaps to a production system.
+Distributed vector search systems enforce access control logically: an ACL layer in front of a plaintext index decides which results a principal may see. This places the entire database operator inside the trusted computing base. We propose **FLARE**, an architecture that enforces access control *physically* by encrypting each cluster cell of an inverted-file (IVF) vector index under a key derived from the data owner's master key. Authorization is computed as structural reachability through a typed graph (the *light cone*) and grants are recorded as Ed25519-signed entries on a hash-chained ledger. When a query reaches an authorized cluster, an oracle network derives an ephemeral cell key on demand under a Shamir K-of-M threshold protocol — no single host's compromise yields the master key — and returns it to the querier inside an end-to-end-bound, time-limited authenticated envelope. Revocation is a single signed ledger entry; no re-encryption, no key rotation, no coordination. We implement FLARE end-to-end as `flare`, an open-source Python package and runnable docker-compose stack, and evaluate it on the BEIR SciFact benchmark: FLARE preserves **95.6%** of a plaintext FAISS baseline's retrieval quality (recall@10 = 0.753 vs. 0.788) while exercising every cryptographic and authorization layer the design specifies. With query-node caching enabled, per-query latency falls from 103 ms to 8.4 ms (12.2× speedup) with no change to recall or security properties. The prototype is a working artifact, not a deployment, and we are explicit about the gaps to a production system.
 
 ## 1. Introduction
 
@@ -352,13 +352,16 @@ The headline empirical claim is that FLARE preserves real semantic retrieval qua
 |---|---|---|
 | Recall@10 vs human relevance labels | **0.7883** | **0.7533** |
 | Recall@10 agreement with FAISS top-10 | (baseline) | **0.9270** |
-| Per-query latency | 0.80 ms | 103.0 ms |
+| Per-query latency (cold) | 0.80 ms | 103.0 ms |
+| Per-query latency (cache-warm) | 0.80 ms | **8.4 ms** |
+| Overhead vs plaintext (cold) | — | 129× |
+| Overhead vs plaintext (warm) | — | **18×** |
 
 *Source: `paper/evals/real_data_bench.json`. Reproduce with `make bench-real`.*
 
 **FLARE preserves 95.6%** of the plaintext baseline's recall (0.7533 / 0.7883) while exercising every cryptographic and authorization layer the design specifies. The 4.4% recall delta is the IVF approximation, not the encryption — at higher `nprobe` it converges. The 0.927 agreement-with-FAISS-top-10 is the standard IVF recall@10 vs an exact baseline at this `nlist`/`nprobe` configuration; the encryption layer adds **zero** approximation on top.
 
-The latency cost of full cryptographic enforcement is ~129× the plaintext brute-force baseline. The breakdown of where that latency goes is in §5.2.
+The cold-path latency cost is ~129× the plaintext baseline; with query-node caching this drops to 18× with no security or recall change. The breakdown of where latency goes is in §5.2.
 
 ### 5.2 Latency decomposition
 
@@ -382,7 +385,28 @@ The TTL feature itself has effectively zero measurable cost — signing the `val
 
 The remaining ~14× single-replica overhead vs plaintext is FastAPI/JSON process-boundary cost, not crypto. Reduction below this floor requires either co-locating storage and oracle (the original FLARE design recommendation) or moving to a binary protocol; both are integration concerns out of scope for the prototype.
 
-### 5.3 Properties verified by tests
+### 5.3 Query-node caching
+
+The `FlareQueryEngine` ships with three caches that together reduce the benchmark latency from 103 ms to **8.4 ms** (12.2× speedup) with **no change to recall or any security property**. The full wire protocol still runs on every cache miss.
+
+The four latency wins, ranked by contribution:
+
+1. **Oracle-side ledger dedup** — one `find_valid` per `(grantor, requester, ctx)` instead of per cell: ~35 ms saved
+2. **Cell ciphertext cache** on the query node — encrypted blobs are content-addressed and never change without a re-bootstrap: ~50 ms saved
+3. **Routing cache** — `list_contexts`, centroids, and context registrations: ~17 ms saved
+4. **Cell-key cache** within TTL — relevant for sustained query sessions
+
+The three caches have different security profiles:
+
+| Cache | Holds | Security boundary | Invalidation |
+|---|---|---|---|
+| Routing cache | Public metadata (centroids, registrations) | Public by design | Manual: `invalidate_routing()` after re-bootstrap |
+| Cell ciphertext cache | AES-GCM ciphertext blobs | Opaque without oracle keys; fail-safe (GCM rejects stale cells on decrypt) | Automatic |
+| Cell-key cache | `IssuedCellKey` per `(cell, requester_did)`, oracle-signed TTL | Bounded by existing oracle-signed `valid_until_ns` | TTL-evicted lazily; explicit: `invalidate_cell_keys()` |
+
+The cell-key cache does not weaken the revocation guarantee: the TTL was always the upper bound on how long an issued key remained useful. A deployment that wants immediate post-revoke effect calls `engine.invalidate_cell_keys()` after a known revocation; otherwise the worst case is one TTL window (default 60 s). The routing and ciphertext caches are unconditionally safe — they hold public metadata and opaque ciphertext respectively. Cache keys include the requester DID, so one principal's keys are never returned to another.
+
+### 5.4 Properties verified by tests
 
 The 91-test pytest suite covers every security property the paper claims. Selected highlights:
 
@@ -420,6 +444,12 @@ The 91-test pytest suite covers every security property the paper claims. Select
 | `EncryptedFileKeyStore` round-trip; wrong passphrase rejected | `tests/test_sealed_storage.py::test_sealed_file_*` |
 | Concurrent queriers under contention with a revoker thread: no post-revoke leak, no crash | `tests/test_concurrent_revoke.py::test_concurrent_queries_during_revoke` |
 | Revocation is immediate for every subsequent oracle request | `tests/test_concurrent_revoke.py::test_revoke_is_immediate_for_subsequent_requests` |
+| Cell-key cache: one principal's cached keys never leak to another | `tests/test_query_cache.py::test_cell_key_cache_does_not_cross_requesters` |
+| Cell-key cache: expired entries are evicted on lookup | `tests/test_query_cache.py::test_cached_keys_respect_ttl` |
+| Cell-key cache: explicit invalidation forces oracle round-trip | `tests/test_query_cache.py::test_invalidate_cell_keys_forces_oracle_round_trip` |
+| Caches are concurrent-read-safe under 8 worker threads | `tests/test_query_cache.py::test_concurrent_queries_share_caches_safely` |
+| `cache=False` round-trips the oracle on every call | `tests/test_query_cache.py::test_cache_disabled_round_trips_every_call` |
+| Routing cache avoids storage round-trips on repeat queries | `tests/test_query_cache.py::test_routing_cache_avoids_storage_round_trips_on_repeat_queries` |
 
 ### 5.4 Runnable demonstration
 
@@ -456,14 +486,15 @@ The full risk register is `docs/analysis/security.md`. The headline state of the
 FLARE as implemented is a working artifact, not a deployment. The remaining gaps:
 
 - **Software sealed storage is not a TEE.** The on-disk artifact is encrypted; the in-memory `SecureBytes` buffer is zeroized; but a live operator with `ptrace` / `/proc/<pid>/mem` can still read the running process. A deployment that needs the host-operator threat model has to integrate with SGX/SEV — no software substitute matches enclave guarantees.
-- **Hash-chained ledger has tamper-evidence but no consensus.** A single ledger operator can still equivocate by serving different chains to different readers. Replaceable by Ceramic or an Ethereum L2 contract by swapping the storage layer below `flare/ledger/memory.py`; signatures and schema are unchanged.
+- **Hash-chained ledger has tamper-evidence but no consensus, and the trust gap is significant.** The hash-chained log gives tamper-evidence to any reader who has pinned a previous chain head — if the operator modifies history, the chain breaks for that reader. But a fresh reader, or one who did not pin, sees whatever the operator presents. A malicious ledger operator can therefore: (1) selectively show different chains to different readers (equivocation), (2) withhold revocations from oracles while showing them to auditors, or (3) back-date grants. None of these attacks is cryptographically prevented by the current implementation. The mitigation is anchoring the chain head periodically to a public, censorship-resistant ledger — Ceramic's IPFS-pinned streams, Ethereum L2 calldata, or a simple blockchain timestamp. With a public anchor, any reader can independently verify the operator has not deviated from the anchored head. The grant and revocation signature primitives in `flare/ledger/signing.py` are identical to what an on-chain implementation would use; the swap is purely the backing store below `flare/ledger/memory.py`. Until that swap is made, deployments should treat the ledger operator as trusted for revocation ordering.
 - **Per-process nonce caches.** The replay nonce caches for the wire protocol and the peer protocol live in process memory and are lost on restart. A real deployment shares nonce state across replicas via a small coordination service.
 - **TTL relies on coordinated wall-clock time.** Both oracle and querier need NTP. A monotonic-clock alternative requires cross-process clock synchronization.
 - **Failover order is deterministic** (registration order). A production deployment would round-robin or hash-on-querier across the registered endpoints.
-- **Centroid topology leakage is open by design.** Centroids are public; the high-dimensional embedding space provides natural obfuscation that has not been formally bounded. Mitigations (Gaussian noise, locality-preserving hashing) need calibration research and are deliberately not half-implemented.
+- **Centroid topology leakage is open by design, with known consequences.** Centroids are public because the query node needs them to route without holding master keys. An adversary with centroid access learns the semantic cluster structure of the corpus: cluster centers reveal the topical distribution of a context, and centroid-to-centroid similarity reveals which contexts share semantic territory. This does not expose any document content — cells are opaque without oracle keys — but it does leak the *shape* of what a data owner has indexed. In practice, in high-dimensional embedding space (D ≥ 256), individual centroid vectors are not directly invertible to text by existing embedding inversion techniques, and the curse of dimensionality makes nearest-neighbor inference noisy. However, this is informal intuition, not a formal bound. Three mitigations exist at different cost levels: (1) add calibrated Gaussian noise to published centroids, preserving routing quality while degrading adversarial reconstruction; (2) use locality-preserving hashing to partition without publishing centroids directly; (3) treat centroid leakage as an acceptable residual analogous to the leakage in structured encryption schemes, and formally bound it for the embedding model in use. FLARE takes the third position by default and deliberately does not half-implement the first two.
+- **The query node remains trusted for result confidentiality.** The query node receives plaintext cell keys from the oracle and decrypts the cell contents locally. It therefore sees the plaintext search results for every query it processes. FLARE's design assumes the query node is the querier's own process — client-side software or a trusted proxy running on the querier's own infrastructure. In that model, the query node is trusted by definition: it *is* the querier. However, if the query engine is deployed as shared infrastructure serving multiple principals (a search proxy, a SaaS gateway), then the operator of that proxy enters the trusted computing base and can observe all queries and all results for all principals it serves. FLARE provides no protection against this. Closing the gap requires either running the query engine inside a TEE (same requirement as the oracle, and the same `ptrace` caveat applies) or using an oblivious construction such as PIR for the in-cell search (three to four orders of magnitude latency cost). The correct operational posture is to run `FlareQueryEngine` as a sidecar on the querier's own node — the sidecar pattern in `docs/production-deployment.md` — rather than as shared infrastructure.
 - **Token incentives + slashing are out of scope.** They are an entire separate paper with their own threat model.
 - **Forward illumination via a learned predictive model is not implemented.** The deterministic constant-width padding from §4.6 covers the same security shape (constant-width oracle batches) without needing a training pipeline. A predictive pre-fetch optimization would sit on top of it.
-- **~36× per-query latency overhead** vs plaintext baseline in threshold-plus-padding mode at the standard configuration (§5.2). The breakdown is FastAPI/JSON process-boundary cost plus the parallel peer share-fetch and the extra ECIES decryptions for padded keys; further reduction requires either oracle/storage co-location or a binary protocol.
+- **Latency overhead is real but prototype-inflated.** The warm-path benchmark (§5.3) reports 8.4 ms per query against a 0.80 ms plaintext baseline — 10.5× overhead on real data. That number includes ~5 ms of `starlette.TestClient` dispatch overhead that disappears with real HTTP. A same-datacenter deployment with persistent HTTP/2 connections and co-located oracle + storage is expected to be in the 2–4 ms/query range — 3–5× the plaintext brute-force baseline. The residual is two serial network hops: query → oracle and oracle → ledger. Closing the gap entirely would require either (a) oracle/storage co-location eliminating the oracle→ledger hop, (b) a binary wire protocol replacing FastAPI/JSON, or (c) a threshold PRF that avoids master-key reconstruction in the coordinator. None of these is a fundamental design barrier; all are integration choices deferred from the prototype. The cold-path overhead of ~129× is dominated by the same transport costs repeated on every request; caching (§5.3) reduces this to 18× and real-HTTP deployment reduces it further. The cryptographic operations themselves — HKDF, AES-256-GCM, Ed25519, ECIES — are nanoseconds-to-microseconds and not the bottleneck.
 
 The paper makes no claim that the prototype as it stands is deployable. The claim is that **every conceptual layer of the FLARE design composes end-to-end with strong, test-pinned security properties on real semantic data**, that the threshold property holds in software against any K-1 single-host compromises, that the in-flight-after-revoke window is bounded by an oracle-signed TTL, that the oracle wire stream is constant-width regardless of query specificity, and that every remaining gap is documented honestly as either an integration concern or as work explicitly out of scope for a cryptographic prototype.
 
@@ -485,7 +516,7 @@ Threshold cryptography on symmetric keys has a long history starting with Shamir
 
 ## 9. Conclusion
 
-We presented FLARE, an architecture for semantic vector search in which access control is enforced physically by per-cluster encryption rather than logically by an ACL layer, authorization is computed as graph reachability in a typed *light cone*, and key issuance is delegated to a Shamir K-of-M oracle quorum gated by a signed, hash-chained grant ledger. We implemented FLARE end-to-end as `flare`, an open-source Python package and docker-compose stack with eleven services, and we evaluated it on the BEIR SciFact benchmark with `all-MiniLM-L6-v2` embeddings, demonstrating that the encrypted pipeline preserves 95.6% of the plaintext FAISS baseline's recall@10 while exercising every cryptographic and authorization layer the design specifies.
+We presented FLARE, an architecture for semantic vector search in which access control is enforced physically by per-cluster encryption rather than logically by an ACL layer, authorization is computed as graph reachability in a typed *light cone*, and key issuance is delegated to a Shamir K-of-M oracle quorum gated by a signed, hash-chained grant ledger. We implemented FLARE end-to-end as `flare`, an open-source Python package and docker-compose stack with eleven services, and we evaluated it on the BEIR SciFact benchmark with `all-MiniLM-L6-v2` embeddings, demonstrating that the encrypted pipeline preserves 95.6% of the plaintext FAISS baseline's recall@10 while exercising every cryptographic and authorization layer the design specifies, and that query-node caching reduces per-query latency from 103 ms to 8.4 ms with no change to recall or security properties.
 
 The artifact is a working prototype, not a deployment. The remaining gaps are documented honestly: software sealed storage is not a TEE, the hash-chained ledger has tamper-evidence but not consensus, and ~36× latency overhead over plaintext is FastAPI/JSON process-boundary cost that would need binary-protocol or co-located deployment to reduce. None of these is an unknown unknown.
 

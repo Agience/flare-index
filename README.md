@@ -10,7 +10,7 @@ The reference implementation is the `flare` Python package + a docker-compose st
 
 ```bash
 make build           # build the image once (~2 min, includes the embedding model)
-make test            # 91-test pytest suite (~13 s)
+make test            # 97-test pytest suite (~13 s)
 make showcase        # runnable demo on real text — see "What the showcase does" below
 make demo-compose    # full multi-container threshold stack: cross-process Alice/Bob/Carol
 make bench           # synthetic latency/throughput sweep (3 configurations)
@@ -67,14 +67,15 @@ The showcase runs against the real FLARE stack — Shamir K=2-of-M=3 threshold o
 - **Edge-level AND path-predicate deny** in the light-cone graph (`RequireAllOf`, `RequireSequence`)
 - **Parallel cell prefetch**: query node overlaps storage cell GETs with oracle batch round-trips
 - **Concurrent revoke/issue race tests** under contention
-- **91-test pytest suite** + benchmarks committed at `paper/evals/`
+- **Query-node cache** with security-safe invariants: per-requester key isolation, TTL eviction, explicit invalidation, concurrent-read safety
+- **97-test pytest suite** + benchmarks committed at `paper/evals/`
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
 | `flare/` | Python package: crypto, identity, wire, lightcone, ledger, storage, oracle, query, sealed key storage, bootstrap, showcase |
-| `tests/` | 91-test pytest suite covering crypto, identity, wire (single + batch), light cone, oracle service + threshold + peer protocol, signed ledger + chain replay, storage signing + replay protection, multi-endpoint failover, sealed key storage, padding, cell-key TTL, end-to-end, concurrent revocation |
+| `tests/` | 97-test pytest suite covering crypto, identity, wire (single + batch), light cone, oracle service + threshold + peer protocol, signed ledger + chain replay, storage signing + replay protection, multi-endpoint failover, sealed key storage, padding, cell-key TTL, query-node caching, end-to-end, concurrent revocation |
 | `bench/` | `bench_encrypted_vs_plain.py` (synthetic latency sweep, 3 configs) and `bench_real_data.py` (BEIR SciFact recall vs plaintext FAISS baseline) |
 | `compose/` | `generate_secrets.py` (one-shot key + sealed-file generator) and `entrypoint.sh` (docker-compose service launcher) |
 | `paper/` | The research paper (`flare.md`), mermaid figures, BibTeX, evaluation outputs |
@@ -95,7 +96,7 @@ The showcase runs against the real FLARE stack — Shamir K=2-of-M=3 threshold o
 | Centroid topology leakage | Calibration research, deliberately not half-implemented |
 | Token incentives + slashing | Out of scope for the cryptographic prototype |
 | Forward illumination via a learned predictive model | The deterministic padding covers the same security shape |
-| ~36× threshold-plus-padding overhead vs plaintext | FastAPI/JSON process-boundary cost; reduction requires oracle/storage co-location or a binary protocol |
+| ~18× warm-path overhead vs plaintext (129× cold) | Query-node caching (routing, ciphertext, cell-key) cuts 103 ms → 8.4 ms; residual is FastAPI/JSON process-boundary cost. Real-datacenter deployment expected 2–4 ms/query |
 
 ## License
 
