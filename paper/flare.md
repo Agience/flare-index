@@ -155,9 +155,9 @@ sequenceDiagram
     Q->>C: POST /issue-batch (signed by DID_q)
     C->>C: verify querier sig + replay + skew
     C->>L: per-cell grant lookup
-    Note over C: needs K=2 shares; has s_1, needs 1 more
+    Note over C: needs K=2 shares (has s_1, needs 1 more)
     par parallel peer share-fetch
-        C->>P2: POST /peer/share<br/>signed by C's oracle DID
+        C->>P2: POST /peer/share (signed by C's oracle DID)
         P2->>P2: verify C's sig (allowlist check)
         P2->>P2: verify INNER querier sig
         P2->>L: independent per-cell grant lookup
