@@ -1,0 +1,29 @@
+sequenceDiagram
+    participant Q as Query Node (DID_q)
+    participant O as Oracle (DID_o)
+    Note over Q: Generate ephemeral X25519 keypair (eph_sk, eph_pk)
+    Q->>Q: nonce = random(16)
+    Q->>Q: ts = now_ns()
+    Q->>Q: msg = canonical(DID_q, ctx, cluster, eph_pk, ts, nonce)
+    Q->>Q: sig = Ed25519.sign(msg, DID_q)
+    Q->>O: POST /issue { request, signature }
+    O->>O: Resolve DID_q -> Ed25519 pubkey (did:key, no network)
+    O->>O: Verify signature
+    O->>O: Check |now - ts| <= 60s
+    O->>O: Check nonce not in replay cache
+    O->>O: Look up grant in ledger (now=ts)
+    alt grant valid
+        O->>O: cell_key = HKDF(master, ctx || cluster)
+        O->>O: oracle_eph_sk, oracle_eph_pk = X25519.gen()
+        O->>O: shared = X25519(oracle_eph_sk, eph_pk)
+        O->>O: sym = HKDF(shared)
+        O->>O: ct = AES-GCM(sym, cell_key, AAD=msg)
+        O-->>Q: 200 { oracle_eph_pk, nonce, ct }
+        Q->>Q: shared' = X25519(eph_sk, oracle_eph_pk)
+        Q->>Q: sym' = HKDF(shared')
+        Q->>Q: cell_key = AES-GCM.decrypt(sym', ct, AAD=msg)
+    else grant absent / revoked
+        O-->>Q: 403 { reason }
+    else auth/replay/skew failure
+        O-->>Q: 401
+    end

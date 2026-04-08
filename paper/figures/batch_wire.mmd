@@ -1,0 +1,28 @@
+sequenceDiagram
+    participant Q as Query Node (DID_q)
+    participant ST as Storage
+    participant O as Oracle (DID_o, signing key sk_o)
+    Note over Q: Resolve registrations -> learn (oracle_url, oracle_did) per context
+    Note over Q: Group authorized cells by oracle endpoint
+    par parallel storage prefetch
+        Q->>ST: GET /cells/{c1}
+        Q->>ST: GET /cells/{c2}
+        Q->>ST: GET /cells/{cN}
+    and oracle batch
+        Q->>Q: eph_sk, eph_pk = X25519.gen()
+        Q->>Q: msg = canonical(DID_q, [(ctx,cluster)...], eph_pk, ts, nonce)
+        Q->>Q: req_sig = Ed25519.sign(msg, DID_q)
+        Q->>O: POST /issue-batch { request, req_sig }
+        O->>O: Verify req_sig (resolve DID_q via did:key)
+        O->>O: Skew + replay checks
+        O->>O: For each (ctx, cluster):<br/>resolve grant, derive cell_key
+        O->>O: shared = X25519(eph_o_sk, eph_pk)
+        O->>O: For each cell_key:<br/>ct = AES-GCM(shared, cell_key, AAD=msg||idx)
+        O->>O: resp_canonical = msg || DID_o || eph_o_pk || entries
+        O->>O: resp_sig = Ed25519.sign(resp_canonical, sk_o)
+        O-->>Q: { DID_o, eph_o_pk, entries, resp_sig }
+    end
+    Q->>Q: Verify DID_o == registered oracle_did
+    Q->>Q: Verify resp_sig under DID_o
+    Q->>Q: Decrypt every granted entry under shared
+    Q->>Q: Decrypt prefetched cells with cell_keys

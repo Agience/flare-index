@@ -1,0 +1,29 @@
+sequenceDiagram
+    participant Q as Query Node (DID_q)
+    participant C as Coordinator Oracle<br/>(replica 1, share s_1)
+    participant P2 as Peer Oracle<br/>(replica 2, share s_2)
+    participant P3 as Peer Oracle<br/>(replica 3, share s_3)
+    participant L as Ledger
+    Q->>C: POST /issue-batch (signed by DID_q)
+    C->>C: verify querier sig + replay + skew
+    C->>L: per-cell grant lookup (ledger query)
+    Note over C: needs K=2 shares; has s_1, needs 1 more
+    par parallel peer share-fetch
+        C->>P2: POST /peer/share<br/>signed by C's oracle DID,<br/>carries verbatim querier batch
+        P2->>P2: verify C's sig (allowlist check)
+        P2->>P2: verify INNER querier sig
+        P2->>L: independent per-cell grant lookup
+        P2-->>C: ECIES(s_2) + Ed25519 sig
+    and
+        C->>P3: POST /peer/share
+        P3->>P3: verify C's sig + replay + skew
+        P3->>P3: verify INNER querier sig
+        P3->>L: independent per-cell grant lookup
+        P3-->>C: ECIES(s_3) + Ed25519 sig
+    end
+    Note over C: first 1 to arrive wins<br/>(needed = K - 1 = 1)
+    C->>C: master_key = reconstruct(s_1, s_arrived)
+    C->>C: cell_key_i = HKDF(master_key, ctx_i || cluster_i)
+    C->>C: drop master_key + peer share
+    C->>C: ECIES + sign batch response (Phase 2 wire)
+    C-->>Q: BatchIssueKeyResponse

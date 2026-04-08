@@ -1,0 +1,19 @@
+{
+  "phase": 3,
+  "config": "threshold-K2-of-M3",
+  "n_vectors": 20000,
+  "dim": 64,
+  "nlist": 64,
+  "nprobe": 8,
+  "k": 10,
+  "queries": 100,
+  "plaintext_brute_force_total_s": 0.2435,
+  "encrypted_flare_total_s": 6.8596,
+  "plaintext_per_query_ms": 2.435,
+  "encrypted_per_query_ms": 68.596,
+  "encrypted_overhead_ratio": 28.166,
+  "recall_at_k": 0.446,
+  "threshold_k": 2,
+  "threshold_m": 3,
+  "notes": "Phase 3 threshold (K=2 of M=3): one peer share-fetch round trip per batch in addition to the single-replica path. The reconstructed master key is held in memory only for the duration of one batch."
+}

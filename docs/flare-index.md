@@ -16,7 +16,7 @@ The FLARE Index is a decentralized, physically-enforced semantic search system w
 
 The system unifies three independently-documented ideas:
 
-1. [Light-Cone Graph Authorization](light-cone-graph-authorization.md) — time-respecting graph reachability determines who can see what
+1. [Light-Cone Graph Authorization](light-cone-graph-authorization.md) — graph reachability determines who can see what
 2. [Partitioned Encrypted Vector Search](partitioned-encrypted-vector-search.md) — IVF cluster cells encrypted with per-cluster derived keys
 3. **Oracle-Delegated Key Management** (this document) — owner-trusted intermediaries issue ephemeral keys gated by grant validity
 
@@ -108,7 +108,7 @@ Fully documented in [light-cone-graph-authorization.md](light-cone-graph-authori
 **Input:** principal_id, query_time
 **Output:** set of authorized context_ids (workspace, collection, project, channel, etc.)
 
-The graph is stored in ArangoDB (or equivalent graph DB). Traversal is bounded by hop limit K, time window Δt, and edge-type grammar. Deny edges override any allow path. Derived data inherits audience constraints via monotone sensitivity rules.
+The graph is stored in ArangoDB (or equivalent graph DB). Traversal is bounded by hop limit K and edge-type grammar. Deny edges override any allow path. Derived data inherits audience constraints via monotone sensitivity rules.
 
 **Key property for this system:** the context_ids returned by the light cone map 1:1 to encryption domains (cluster partitions). The authorization result is simultaneously the decryption scope.
 

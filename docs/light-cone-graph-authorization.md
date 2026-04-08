@@ -9,7 +9,7 @@ Agience currently supports access control at the **workspace/collection/share bo
 
 This proposed feature introduces a new authorization primitive:
 
-- **Authorization** is computed as **time-respecting reachability** through a **typed multigraph** (the “light cone”).
+- **Authorization** is computed as **structural reachability** through a **typed multigraph** (the “light cone”).
 - **Embeddings do not grant access**. They only rank and optionally expand results **within an already authorized candidate set**.
 
 In short: **graph reachability gates visibility; semantic ranking improves relevance inside the gate**.
@@ -36,9 +36,8 @@ In short: **graph reachability gates visibility; semantic ranking improves relev
 
 ### Core idea
 
-Visibility of information is determined by whether a receiver principal can reach an information node via an **allowed path** in a **time-indexed typed graph**, respecting:
+Visibility of information is determined by whether a receiver principal can reach an information node via an **allowed path** in a typed graph, respecting:
 
-- edge validity windows
 - explicit deny boundaries
 - classification / scope constraints
 - derivation constraints (outputs inherit input constraints)
@@ -47,10 +46,10 @@ After the authorized set is computed, OpenSearch ranks within it using BM25 + se
 
 ### Deterministic candidate set
 
-Given receiver $r$ querying at time $t_q$:
+Given receiver $r$:
 
 $$
-C(r,t_q)=\{x\in \text{InfoNodes}\mid x\text{ is reachable from }r\text{ by an allowed path respecting time and policy}\}
+C(r)=\{x\in \text{InfoNodes}\mid x\text{ is reachable from }r\text{ by an allowed path respecting policy}\}
 $$
 
 Then apply hard rules (deny, classification, key access, derivation monotonicity) to obtain the authorized set $A\subseteq C$.
@@ -60,7 +59,7 @@ Then apply hard rules (deny, classification, key access, derivation monotonicity
 For each authorized info node $x$ with embedding $e_x$ and query embedding $e_q$:
 
 $$
-\text{score}(x)=\alpha\cdot \text{sim}(e_q,e_x)+\beta\cdot \text{recency}(x)+\gamma\cdot \text{relationship}(r,x)+\dots
+\text{score}(x)=\alpha\cdot \text{sim}(e_q,e_x)+\beta\cdot \text{relationship}(r,x)+\dots
 $$
 
 Optional semantic expansion is permitted only if it stays inside $A$.
@@ -86,7 +85,6 @@ Each edge includes:
 
 - `type`
 - `src`, `dst`
-- `t_start`, `t_end` (validity window)
 - optional `weight`, `attributes`, `reason`, `scope`
 
 ### Edge types (examples)
@@ -120,15 +118,6 @@ Examples of disallowed sequences:
 
 - Paths that include VIEWED/STARRED/EDITED edges as authorizing steps
 
-### Time semantics
-
-Edges have validity windows. The system can support two policy modes:
-
-1. **Query-time only** (simpler): receiver must be in-scope at $t_q$ to traverse membership/share edges.
-2. **Query-time + event-time** (stricter): additionally require that the receiver was in-scope at the time the info was created/posted.
-
-Event-time semantics decide whether users who join later can see historical data by default.
-
 ### Deny overrides
 
 Deny boundaries override any allow path. This can be modeled as:
@@ -141,7 +130,6 @@ Deny boundaries override any allow path. This can be modeled as:
 To keep p95 predictable:
 
 - hop limit $K$
-- time window limit $\Delta t$
 - per-edge-type caps (top-N expansions)
 - precomputed reachability indexes for common contexts (project/channel/workspace)
 
@@ -226,14 +214,14 @@ Recommended starting collections (illustrative):
   - `deny_edges` for explicit DENY boundaries (kept separate to simplify traversal filters)
   - `derivation_edges` (DERIVED_FROM, GENERATED_BY, USED_INPUT)
 
-Each edge should include `t_start`/`t_end` and enough attributes to support explainability (e.g., `reason`, `scope`, `key_ref`, `source_event_id`).
+Each edge should include enough attributes to support explainability (e.g., `reason`, `scope`, `key_ref`, `source_event_id`).
 
 ### The authorization service boundary
 
 Add a service responsible for computing visibility:
 
 - `GraphAuthzService` (new) as the orchestrator
-  - inputs: `tenant_id` (or `user_id` if tenant == user), receiver principal, query time, policy mode
+  - inputs: `tenant_id` (or `user_id` if tenant == user), receiver principal, policy mode
   - outputs: an **authorized filter** (preferably compact tokens) and optional **explanation witnesses**
 
 This service should be called from the search router before executing OpenSearch.
@@ -242,13 +230,10 @@ This service should be called from the search router before executing OpenSearch
 
 Implement a bounded traversal with:
 
-- **Edge validity filter** at query time $t_q$
-  - only traverse edges where `t_start <= t_q < t_end` (or `t_end` null)
 - **Grammar whitelist**
   - restrict which edge types can be used, and optionally restrict sequences (e.g., disallow VIEWED/STARRED)
-- **Hop and time-window bounds**
+- **Hop bound**
   - `K` hop limit
-  - optional $\Delta t$ bound to avoid “infinite history” expansions
 - **Deny override**
   - early pruning: if a candidate path crosses a deny boundary, terminate that branch
 
@@ -256,18 +241,6 @@ The traversal should return:
 
 - a set of authorized `root_id` (preferred) or `version_id`
 - optionally a minimal witness path per returned root/version for explainability
-
-### Handling query-time vs event-time semantics
-
-Support two modes as a policy setting:
-
-- Query-time only: membership/share edges must be valid at $t_q$.
-- Query-time + event-time: in addition, require that receiver was in-scope at info creation/posting time.
-
-Practical approach:
-
-- Each Info node stores `event_time` (created/post time).
-- When event-time is enabled, membership/share edges must be valid at both $t_q$ and `event_time` (or a defined join policy).
 
 ### Derived data enforcement
 
@@ -306,36 +279,34 @@ Agience already has an indexing pipeline and a unified search accessor; the key 
 Add optional request fields to `/search`:
 
 - `auth_mode`: `"legacy" | "light_cone" | "auto"` (feature flag / rollout)
-- `auth_time_mode`: `"query_time" | "query_and_event_time"`
 - `explain`: boolean (include “why visible” witnesses)
 
 Response additions (when `explain=true`):
 
 - `auth`:
   - `candidate_count`, `authorized_count`
-  - per-hit witness snippet: minimal edge sequence and timestamps
+  - per-hit witness snippet: minimal edge sequence
 
 ### Caching
 
 Graph reachability can be cached aggressively:
 
-- Cache principal→context reachability tokens for a short TTL (e.g., 30–120s) and invalidate on membership/share changes.
+- Cache principal→context reachability tokens for a short TTL and invalidate on membership/share changes.
 - Cache “receiver cone for project/channel/workspace” separately from the query text.
 
-The cache key should include receiver principal, time mode, and (if used) a “policy version.”
+The cache key should include receiver principal and (if used) a “policy version.”
 
 ## Benefits
 
 ### Product benefits
 
 - **Less manual sharing**: visibility follows real context and relationships (project/channel/workspace) rather than requiring explicit ACLs everywhere.
-- **Faster onboarding**: late-joiner behavior becomes a policy toggle (query-time vs event-time).
 - **Explainable access**: every visible item can come with a path witness (“you can see this because…”).
 
 ### Security benefits
 
 - **Embeddings never grant access**: semantic is strictly post-authorization ranking.
-- **Revocation is natural**: expiring membership/share edges immediately shrinks the reachable cone.
+- **Revocation is natural**: removing membership/share edges immediately shrinks the reachable cone.
 - **Transform safety**: summaries/derivatives can be forced to inherit audience constraints.
 
 ### Engineering benefits
@@ -347,7 +318,6 @@ The cache key should include receiver principal, time mode, and (if used) a “p
 
 - The system is tenant-scoped (a receiver principal is evaluated within one tenant boundary).
 - ArangoDB is the source of truth for relationship/policy edges; OpenSearch is a derived index for ranking.
-- All nodes/edges are time-indexed using a consistent timestamp representation (ISO 8601 recommended).
 - Each artifact has stable `root_id` and specific `version_id` and the search indices contain these fields.
 - There is a reliable mapping from authenticated identity (JWT / grant token) → principal node id.
 
@@ -355,10 +325,9 @@ The cache key should include receiver principal, time mode, and (if used) a “p
 
 ### Functional requirements
 
-- Compute authorized candidate set via time-respecting reachability over a typed graph.
+- Compute authorized candidate set via structural reachability over a typed graph.
 - Support explicit deny boundaries that override allow paths.
 - Support an allow-path grammar (configurable list of allowed edge types and optionally sequences).
-- Support query-time mode and (optionally) query-time + event-time mode.
 - Support derived-data constraints:
   - outputs must not exceed the audience of inputs unless explicitly re-shared
   - transforms must be represented and auditable
@@ -374,7 +343,7 @@ The cache key should include receiver principal, time mode, and (if used) a “p
   - metrics: candidate_count, authorized_count, traversal time, OpenSearch time, p95/p99
   - logs: deny reasons, policy mode, path grammar version
 - Testing:
-  - unit tests for grammar/time/deny logic
+  - unit tests for grammar/deny logic
   - integration tests ensuring semantic ranking cannot widen authorization
 - Rollout:
   - feature-flagged `auth_mode` for gradual enablement and controlled cutover.
@@ -384,7 +353,7 @@ The cache key should include receiver principal, time mode, and (if used) a “p
 This feature is designed to support:
 
 - “Why can I see this?” response metadata:
-  - a short path witness (edge sequence + timestamps)
+  - a short path witness (edge sequence)
   - policy decisions applied (deny/classification)
 - Audit logs:
   - queries, candidate counts, denied reasons
@@ -412,7 +381,6 @@ This feature is designed to support:
 
 ### Phase 3 — Enterprise controls
 
-- Event-time semantics options.
 - Purpose/compartment controls.
 - Auditing + policy reports.
 
@@ -421,8 +389,6 @@ This feature is designed to support:
 These materially affect implementation:
 
 - Domain/threat model: enterprise docs, personal memory, regulated data?
-- Time semantics: query-time only vs. query-time + event-time.
-- Historical visibility for late-joiners: default allow vs explicit backfill.
 - Graph size and p95 targets: max candidate set size before ranking.
 - Required explainability level: full path vs summarized reason.
 - Crypto enforcement: do we need envelope keys eventually for zero-trust storage?

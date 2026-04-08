@@ -1,0 +1,17 @@
+{
+  "phase": 3,
+  "config": "single-replica",
+  "n_vectors": 20000,
+  "dim": 64,
+  "nlist": 64,
+  "nprobe": 8,
+  "k": 10,
+  "queries": 100,
+  "plaintext_brute_force_total_s": 0.2347,
+  "encrypted_flare_total_s": 4.6871,
+  "plaintext_per_query_ms": 2.347,
+  "encrypted_per_query_ms": 46.871,
+  "encrypted_overhead_ratio": 19.972,
+  "recall_at_k": 0.446,
+  "notes": "Phase 3 single-replica oracle: signed grants, signed storage writes, Ed25519+ECIES batch wire, no peer share-fetch. Lower bound on threshold cost."
+}

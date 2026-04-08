@@ -1,0 +1,5 @@
+flowchart TB
+    Q[Query Layer<br/>centroid routing] --> A[Authorization Layer<br/>light-cone graph]
+    A --> K[Key Issuance Layer<br/>oracle network]
+    K --> S[Search Layer<br/>encrypted IVF]
+    S --> ST[Storage Layer<br/>encrypted cells]

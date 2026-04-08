@@ -1,0 +1,10 @@
+flowchart LR
+    subgraph Process[single Python process]
+        E[Query Engine]
+        O[LocalOracle<br/>holds master key]
+        L[Ledger]
+        I[FlareIndex<br/>encrypted cells]
+    end
+    E -->|issue_key| O
+    O -->|find_valid| L
+    E -->|search_cell key| I

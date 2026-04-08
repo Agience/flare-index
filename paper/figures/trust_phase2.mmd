@@ -1,0 +1,34 @@
+flowchart LR
+    subgraph QN[Query node]
+        QE[FlareQueryEngine]
+        ID[Querier Identity<br/>Ed25519]
+        Pool[ThreadPool<br/>parallel cell prefetch]
+    end
+    subgraph LG[Ledger service]
+        LD[InMemoryGrantLedger]
+    end
+    subgraph ST[Storage service]
+        SC[Centroids<br/>plaintext, public]
+        CC[Encrypted cells]
+        REG[Context registry<br/>owner_did + oracle_did + URL<br/>signed by owner]
+    end
+    subgraph OA[Oracle Alice]
+        OAcore[OracleCore<br/>Alice master key]
+        OAid[Oracle Identity<br/>Ed25519]
+        OAcache[Nonce cache]
+    end
+    subgraph OB[Oracle Bob]
+        OBcore[OracleCore<br/>Bob master key]
+        OBid[Oracle Identity<br/>Ed25519]
+        OBcache[Nonce cache]
+    end
+
+    QE -->|GET /contexts<br/>GET /centroids| ST
+    Pool -->|GET /cells in parallel| ST
+    QE -->|POST /issue-batch<br/>Ed25519 req sig + ECIES| OA
+    QE -->|POST /issue-batch<br/>Ed25519 req sig + ECIES| OB
+    OA -->|Ed25519 RESPONSE sig<br/>verified by QE against<br/>oracle_did from REG| QE
+    OB -->|Ed25519 RESPONSE sig<br/>verified by QE against<br/>oracle_did from REG| QE
+    OA -->|GET /grants/find| LG
+    OB -->|GET /grants/find| LG
+    QE -.signed by.- ID

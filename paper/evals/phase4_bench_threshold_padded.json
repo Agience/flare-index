@@ -1,0 +1,20 @@
+{
+  "phase": 4,
+  "config": "threshold-K2-of-M3-padded",
+  "padding_width": 16,
+  "n_vectors": 20000,
+  "dim": 64,
+  "nlist": 64,
+  "nprobe": 8,
+  "k": 10,
+  "queries": 100,
+  "plaintext_brute_force_total_s": 0.2865,
+  "encrypted_flare_total_s": 10.2809,
+  "plaintext_per_query_ms": 2.865,
+  "encrypted_per_query_ms": 102.809,
+  "encrypted_overhead_ratio": 35.88,
+  "recall_at_k": 0.446,
+  "threshold_k": 2,
+  "threshold_m": 3,
+  "notes": "Phase 4 threshold + constant-width padding: every oracle batch is padded to NPROBE*2 cells with random authorized cells whose keys are discarded. Closes oracle access-pattern leakage at the cost of K extra ECIES decryptions per query."
+}

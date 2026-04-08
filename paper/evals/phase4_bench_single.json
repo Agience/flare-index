@@ -1,0 +1,18 @@
+{
+  "phase": 4,
+  "config": "single-replica",
+  "padding_width": 0,
+  "n_vectors": 20000,
+  "dim": 64,
+  "nlist": 64,
+  "nprobe": 8,
+  "k": 10,
+  "queries": 100,
+  "plaintext_brute_force_total_s": 0.2875,
+  "encrypted_flare_total_s": 5.4906,
+  "plaintext_per_query_ms": 2.875,
+  "encrypted_per_query_ms": 54.906,
+  "encrypted_overhead_ratio": 19.095,
+  "recall_at_k": 0.446,
+  "notes": "Phase 4 single-replica oracle: signed grants, signed + replay-protected storage writes, Ed25519+ECIES batch wire with TTL on every cell key. No threshold, no padding. Lower bound on Phase 4 oracle latency."
+}

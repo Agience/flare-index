@@ -1,0 +1,13 @@
+{
+  "queries": 50,
+  "stages_ms": {
+    "1. list_contexts": 6.368503042613156,
+    "2. get_centroids (per ctx)": 5.200417798478156,
+    "3. centroid distance + topk": 0.1947508181910962,
+    "4. get_registration": 5.436101660015993,
+    "5. cell prefetch (parallel)": 53.527098981430754,
+    "6. oracle batch (sign+verify+ecies)": 10.818394456873648,
+    "7. decrypt + ANN + merge": 11.834852854372002
+  },
+  "total_ms": 93.3801196119748
+}

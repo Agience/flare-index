@@ -1,0 +1,105 @@
+services:
+  # ----- one-shot: generate identities + master keys + Shamir shares -----
+  secrets:
+    build: .
+    image: flare:dev
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "secrets"]
+    volumes:
+      - .:/work
+      - flare_secrets:/secrets
+    user: "0:0"
+    restart: "no"
+
+  # ----- ledger -----
+  ledger:
+    image: flare:dev
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "ledger"]
+    environment:
+      PORT: "8000"
+    volumes:
+      - .:/work
+    expose: ["8000"]
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+
+  # ----- storage -----
+  storage:
+    image: flare:dev
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "storage"]
+    environment:
+      PORT: "8000"
+    volumes:
+      - .:/work
+    expose: ["8000"]
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+
+  # ----- threshold oracle replicas (3 per owner, K=2 of M=3) -----
+  oracle-alice-1: &oracle_template
+    image: flare:dev
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "oracle-alice-1"]
+    environment:
+      LEDGER_URL: "http://ledger:8000"
+    volumes:
+      - .:/work
+      - flare_secrets:/secrets:ro
+    expose: ["8001"]
+    depends_on:
+      ledger:
+        condition: service_started
+      secrets:
+        condition: service_completed_successfully
+  oracle-alice-2:
+    <<: *oracle_template
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "oracle-alice-2"]
+  oracle-alice-3:
+    <<: *oracle_template
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "oracle-alice-3"]
+  oracle-bob-1:
+    <<: *oracle_template
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "oracle-bob-1"]
+  oracle-bob-2:
+    <<: *oracle_template
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "oracle-bob-2"]
+  oracle-bob-3:
+    <<: *oracle_template
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "oracle-bob-3"]
+
+  # ----- one-shot: cross-process demo against the live stack -----
+  demo:
+    image: flare:dev
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "demo"]
+    environment:
+      LEDGER_URL: "http://ledger:8000"
+      STORAGE_URL: "http://storage:8000"
+      ORACLE_ALICE_URL: "http://oracle-alice-1:8001"
+      ORACLE_BOB_URL: "http://oracle-bob-1:8001"
+    volumes:
+      - .:/work
+      - flare_secrets:/secrets:ro
+    depends_on:
+      ledger:
+        condition: service_started
+      storage:
+        condition: service_started
+      oracle-alice-1: { condition: service_started }
+      oracle-alice-2: { condition: service_started }
+      oracle-alice-3: { condition: service_started }
+      oracle-bob-1: { condition: service_started }
+      oracle-bob-2: { condition: service_started }
+      oracle-bob-3: { condition: service_started }
+
+  # ----- one-shot: pytest in the same image -----
+  flare:
+    image: flare:dev
+    entrypoint: ["bash", "/work/compose/entrypoint.sh", "tests"]
+    volumes:
+      - .:/work
+    environment:
+      PYTHONPATH: /work
+      PYTHONDONTWRITEBYTECODE: "1"
+
+volumes:
+  flare_secrets: {}

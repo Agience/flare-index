@@ -1,0 +1,16 @@
+sequenceDiagram
+    participant U as Querier (Bob)
+    participant R as Routing (centroids)
+    participant L as Light Cone
+    participant OA as Oracle (Alice)
+    participant SD as Encrypted Cells
+    U->>R: query embedding e_q
+    R->>R: pick nearest centroids
+    R->>L: candidate (context, cluster) set
+    L->>L: BFS reachability
+    L->>OA: cells in authorized contexts
+    OA->>OA: check grant ledger
+    OA-->>U: ephemeral cell key (or deny)
+    U->>SD: fetch ciphertext cell
+    U->>U: decrypt + brute-force ANN within cell
+    U->>U: merge, rank, return top-K

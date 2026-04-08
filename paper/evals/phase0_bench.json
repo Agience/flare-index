@@ -1,0 +1,14 @@
+{
+  "n_vectors": 20000,
+  "dim": 64,
+  "nlist": 64,
+  "nprobe": 8,
+  "k": 10,
+  "queries": 100,
+  "plaintext_brute_force_total_s": 0.5856,
+  "encrypted_flare_total_s": 0.5269,
+  "plaintext_per_query_ms": 5.856,
+  "encrypted_per_query_ms": 5.269,
+  "encrypted_overhead_ratio": 0.9,
+  "recall_at_k": 0.446
+}

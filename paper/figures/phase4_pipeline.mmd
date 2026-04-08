@@ -1,0 +1,15 @@
+flowchart TB
+    Q[Query Node] --> R[Centroid routing]
+    R --> LC[Light cone filter]
+    LC --> P[Pad to fixed width<br/>with random authorized cells<br/>F-0.8 closed]
+    P --> G[Group by owner / context]
+    G --> FO{For each owner:<br/>try registered<br/>oracle endpoints<br/>in order}
+    FO -->|endpoint 1| O1[Oracle replica 1]
+    FO -->|on failure| O2[Oracle replica 2]
+    FO -->|on failure| O3[Oracle replica 3]
+    O1 --> TH[Threshold reconstruction<br/>SecureBytes wrapper<br/>zeroized in finally]
+    TH --> TTL[Sign batch + TTL<br/>F-1.5 closed]
+    TTL --> Q
+    Q --> ENF[TTL re-check<br/>at use time]
+    ENF --> DEC[Decrypt cells<br/>discard padded keys]
+    DEC --> RANK[Merge + rank]

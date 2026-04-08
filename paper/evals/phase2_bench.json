@@ -1,0 +1,16 @@
+{
+  "phase": 2,
+  "n_vectors": 20000,
+  "dim": 64,
+  "nlist": 64,
+  "nprobe": 8,
+  "k": 10,
+  "queries": 100,
+  "plaintext_brute_force_total_s": 0.2876,
+  "encrypted_flare_total_s": 6.3402,
+  "plaintext_per_query_ms": 2.876,
+  "encrypted_per_query_ms": 63.402,
+  "encrypted_overhead_ratio": 22.042,
+  "recall_at_k": 0.446,
+  "notes": "Phase 2 numbers include the full wire protocol: Ed25519 request signing + ECIES X25519 ECDH+HKDF+AES-GCM, batched oracle issuance with Ed25519 response signing, parallel storage cell prefetch, FastAPI/httpx round-trip, ledger lookup."
+}
