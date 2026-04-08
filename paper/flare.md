@@ -287,16 +287,16 @@ sequenceDiagram
         O->>O: Verify req_sig (resolve DID_q via did:key)
         O->>O: Skew + replay checks
         O->>O: Threshold reconstruction (K-of-M peer share fetch)
-        O->>O: For each (ctx, cluster):<br/>resolve grant, derive cell_key
+        O->>O: For each (ctx,cluster) resolve grant and derive cell_key
         O->>O: shared = X25519(eph_o_sk, eph_pk)
-        O->>O: For each cell_key:<br/>ct = AES-GCM(shared, cell_key, AAD=msg||idx)
+        O->>O: For each cell_key ct = AES-GCM(shared, cell_key, AAD=msg||idx)
         O->>O: resp = msg || DID_o || eph_o_pk || entries (with valid_until_ns)
         O->>O: resp_sig = Ed25519.sign(resp, sk_o)
         O-->>Q: { DID_o, eph_o_pk, entries, resp_sig }
     end
     Q->>Q: Verify DID_o == registered oracle_did
     Q->>Q: Verify resp_sig under DID_o
-    Q->>Q: Decrypt every granted entry; drop expired
+    Q->>Q: Decrypt every granted entry (drop expired)
     Q->>Q: Decrypt prefetched cells with cell_keys
 ```
 
@@ -524,4 +524,4 @@ What FLARE shows is that the three independently-known primitives — graph-base
 
 ## References
 
-The bibliography is `paper/refs.bib`. Full citations are included for FAISS [Johnson, Douze, Jégou 2017], HKDF [RFC 5869], W3C DID Core [W3C 2022], Shamir secret sharing [Shamir 1979], ABE [Sahai-Waters 2005], Solid [Berners-Lee], Filecoin [Benet 2014], Ocean Protocol, Ceramic Network. Additional citations to BEIR [Thakur et al. 2021], MS MARCO [Nguyen et al. 2016], Sentence-BERT [Reimers and Gurevych 2019], and the SSE / PIR / FHE literature surveyed in §8 will be added in the final pass.
+The bibliography is `paper/refs.bib`. Full citations are included for FAISS [Johnson, Douze, Jégou 2017], HKDF [RFC 5869], W3C DID Core [W3C 2022], Shamir secret sharing [Shamir 1979], ABE [Sahai-Waters 2005], Solid [Berners-Lee], Filecoin [Benet 2014], Ocean Protocol, Ceramic Network, BEIR [Thakur et al. 2021], MS MARCO [Nguyen et al. 2016], and Sentence-BERT [Reimers and Gurevych 2019].
