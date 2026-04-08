@@ -2,7 +2,7 @@
 
 A semantic vector search system in which **access control is enforced cryptographically, not by an ACL layer.** Each cluster cell of an inverted-file (IVF) index is encrypted under a per-cell key derived from the data owner's master key. Authorization is computed as reachability in a typed graph (the *light cone*). Cell keys are issued on demand by a Shamir K-of-M threshold oracle quorum, gated by a signed hash-chained grant ledger. Revocation is a single signed ledger entry — no re-encryption, no key rotation, no coordination.
 
-**Real-data result.** On the BEIR SciFact benchmark (5,183 scientific abstracts, 300 human-labeled queries, `all-MiniLM-L6-v2` embeddings), FLARE preserves **95.6%** of a plaintext FAISS baseline's recall@10 (0.7533 vs 0.7883) while exercising every cryptographic and authorization layer end-to-end. See `paper/evals/real_data_bench.json` and reproduce with `make bench-real`.
+**Real-data result.** On the BEIR SciFact benchmark (5,183 scientific abstracts, 300 human-labeled queries, `all-MiniLM-L6-v2` embeddings), FLARE preserves **95.6%** of a plaintext FAISS baseline's recall@10 (0.7533 vs 0.7883) while exercising every cryptographic and authorization layer end-to-end. Reproduce with `make bench-real`; full methodology in [paper/flare.md](paper/flare.md).
 
 The reference implementation is the `flare` Python package + a docker-compose stack with eleven services. Everything runs in Docker — no host-side installs.
 
@@ -78,7 +78,7 @@ The showcase runs against the real FLARE stack — Shamir K=2-of-M=3 threshold o
 | `tests/` | 97-test pytest suite covering crypto, identity, wire (single + batch), light cone, oracle service + threshold + peer protocol, signed ledger + chain replay, storage signing + replay protection, multi-endpoint failover, sealed key storage, padding, cell-key TTL, query-node caching, end-to-end, concurrent revocation |
 | `bench/` | `bench_encrypted_vs_plain.py` (synthetic latency sweep, 3 configs) and `bench_real_data.py` (BEIR SciFact recall vs plaintext FAISS baseline) |
 | `compose/` | `generate_secrets.py` (one-shot key + sealed-file generator) and `entrypoint.sh` (docker-compose service launcher) |
-| `paper/` | The research paper (`flare.md`), mermaid figures, BibTeX, evaluation outputs |
+| `paper/` | [The research paper](paper/flare.md), mermaid figures, BibTeX, evaluation outputs |
 | `docs/` | Design documents: light cone authorization, encrypted vector search, FLARE index |
 | `docs/production-deployment.md` | Production backend guide: ArangoDB (graph + metadata), MinIO/S3 (encrypted cells), OpenSearch (post-authorization reranking) |
 | `docs/analysis/security.md` | Security risk register: every observation with severity, file:line, and status |
@@ -104,6 +104,4 @@ Apache 2.0. See [LICENSE](LICENSE).
 
 ## Authors
 
-John Sessford, with Claude (Anthropic) as a development collaborator.
-
-Research paper: `paper/flare.md`. Every empirical claim traces to a reproducible artifact in `paper/evals/`. Every design claim traces to code in `flare/`. Every security claim traces to a test in `tests/`.
+John Sessford. Built with Claude (Anthropic).
