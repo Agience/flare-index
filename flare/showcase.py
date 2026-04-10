@@ -226,7 +226,7 @@ def main() -> None:
     print(f"      bob   oracle replicas: {[u for u in b_urls]}")
 
     print("\n[5/7] Bootstrapping contexts — owners encrypt their corpora and publish.")
-    bootstrap_context(
+    cooking_result = bootstrap_context(
         storage=storage, context_id="cooking",
         owner_identity=alice,
         oracle_endpoints=[OracleEndpoint(url=u, oracle_did=oid.did)
@@ -234,7 +234,7 @@ def main() -> None:
         vectors=cooking_vecs, ids=cooking_ids,
         master_key=a_master, nlist=4,
     )
-    bootstrap_context(
+    astronomy_result = bootstrap_context(
         storage=storage, context_id="astronomy",
         owner_identity=bob,
         oracle_endpoints=[OracleEndpoint(url=u, oracle_did=oid.did)
@@ -242,6 +242,15 @@ def main() -> None:
         vectors=astronomy_vecs, ids=astronomy_ids,
         master_key=b_master, nlist=4,
     )
+    # Inject encrypted centroids into every oracle replica.
+    for app in a_apps:
+        app.state.core.store_encrypted_centroids(
+            "cooking", cooking_result.encrypted_centroids,
+        )
+    for app in b_apps:
+        app.state.core.store_encrypted_centroids(
+            "astronomy", astronomy_result.encrypted_centroids,
+        )
     print(f"      cooking:   {len(COOKING)} docs encrypted into per-cluster cells under Alice's master key")
     print(f"      astronomy: {len(ASTRONOMY)} docs encrypted into per-cluster cells under Bob's master key")
 
@@ -323,9 +332,10 @@ def main() -> None:
     print("  - Real text was embedded with a real model (all-MiniLM-L6-v2, 384-d).")
     print("  - The embeddings were partitioned per-context and encrypted under per-cell")
     print("    keys derived from each owner's master key (HKDF-SHA256 + AES-256-GCM).")
-    print("  - Each query was routed by plaintext centroids, then filtered by the")
-    print("    light-cone authorization graph, then key-issued by a Shamir K=2-of-M=3")
-    print("    threshold oracle (3 replicas per owner cooperating via signed peer protocol).")
+    print("  - Each query was authorized by the light-cone graph, then centroid maps")
+    print("    were fetched from the oracle (encrypted at rest, delivered via ECIES),")
+    print("    then routed, then key-issued by a Shamir K=2-of-M=3 threshold oracle")
+    print("    (3 replicas per owner cooperating via signed peer protocol).")
     print("  - Every oracle response was Ed25519-signed, ECIES-encrypted, and TTL-bounded.")
     print("  - Grants are signed and live on a hash-chained ledger; revocation is a single")
     print("    signed ledger entry.  No re-encryption.  No key rotation.  No coordination.")

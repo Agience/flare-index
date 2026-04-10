@@ -10,9 +10,10 @@ This file pins the *security-relevant* invariants:
    has not yet passed is reusable.
 3. `invalidate_cell_keys()` makes the cache empty, forcing the next
    query to round-trip the oracle.
-4. The routing cache (centroids, registrations, cell ciphertext) is
-   public information and reusing it across queries cannot leak
-   anything that wasn't already public.
+4. The routing cache (centroids, registrations, cell ciphertext) holds
+   oracle-gated centroid maps plus public registrations and opaque
+   ciphertext. Reusing it across queries from the same requester
+   cannot leak anything beyond what was already authorized.
 5. Concurrent queries from many threads do not race the caches.
 """
 from __future__ import annotations

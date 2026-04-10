@@ -157,10 +157,10 @@ def build_storage_app(storage: Optional[InMemoryStorage] = None) -> FastAPI:
 
     @app.put("/contexts/{ctx}/centroids")
     async def put_centroids(ctx: str, request: Request) -> dict:
-        # Centroids are public routing data, but only the owner of the
-        # context (already verified at registration time) is permitted
-        # to publish them. The signed canonical bytes are
-        # (ctx || cluster_id=-1 || sha256(centroids_npy) || nonce || ts).
+        # Centroids are stored in storage for registration bookkeeping,
+        # but the public GET endpoint returns 403 (see get_centroids).
+        # Only the oracle serves centroid maps to authorized queriers.
+        # Only the owner of the context may upload.
         raw = await request.body()
         sig_b64 = request.headers.get("x-flare-signature", "")
         owner_did_header = request.headers.get("x-flare-owner-did", "")
@@ -208,11 +208,15 @@ def build_storage_app(storage: Optional[InMemoryStorage] = None) -> FastAPI:
 
     @app.get("/contexts/{ctx}/centroids")
     def get_centroids(ctx: str) -> Response:
-        try:
-            arr = storage.get_centroids(ctx)
-        except KeyError:
-            raise HTTPException(status_code=404)
-        return Response(_np_to_bytes(arr), media_type="application/octet-stream")
+        # ANALYSIS A-3: Centroids are no longer served in plaintext.
+        # The oracle delivers centroid maps to authorized queriers via
+        # ECIES inside the /request-centroids endpoint. This endpoint
+        # is retained only for the data owner (authenticated via
+        # x-flare-owner-did + signature) for cold-start oracle loading.
+        raise HTTPException(
+            status_code=403,
+            detail="centroids are oracle-gated; use POST /request-centroids on the oracle",
+        )
 
     @app.post("/contexts/{ctx}/cells/{cluster_id}")
     async def put_cell(ctx: str, cluster_id: int, request: Request) -> dict:

@@ -13,6 +13,9 @@ docker-compose containers and against in-process tests.
 """
 from __future__ import annotations
 
+import base64
+import os
+import time as _time
 from typing import Optional, Protocol
 
 import httpx
@@ -21,11 +24,18 @@ from ..identity import Identity
 from ..types import ClusterId, ContextId
 from ..wire import (
     BatchIssueKeyResponse,
+    CentroidsResponse,
     IssuedCellKey,
     WireError,
     build_batch_request,
+    build_centroids_request,
     verify_and_decrypt_batch_response,
+    verify_and_decrypt_centroids_response,
 )
+
+
+def _b64(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
 
 
 class OracleClient(Protocol):
@@ -35,6 +45,20 @@ class OracleClient(Protocol):
         expected_oracle_did: str,
         cells: list[tuple[ContextId, ClusterId]],
     ) -> list[Optional[IssuedCellKey]]: ...
+
+    def request_centroids(
+        self,
+        identity: Identity,
+        expected_oracle_did: str,
+        context_ids: list[ContextId],
+    ) -> dict[ContextId, Optional[bytes]]: ...
+
+    def upload_encrypted_centroids(
+        self,
+        owner_identity: Identity,
+        context_id: ContextId,
+        encrypted_blob: bytes,
+    ) -> None: ...
 
     def info(self) -> dict: ...
 
@@ -71,6 +95,56 @@ class HttpOracleClient:
         except WireError:
             # Origin authentication failed. Refuse the whole batch.
             return [None] * len(cells)
+
+    def request_centroids(
+        self,
+        identity: Identity,
+        expected_oracle_did: str,
+        context_ids: list[ContextId],
+    ) -> dict[ContextId, Optional[bytes]]:
+        if not context_ids:
+            return {}
+        materials = build_centroids_request(identity, context_ids)
+        r = self._client.post("/request-centroids", json=materials.request.model_dump())
+        if r.status_code in (401, 403):
+            return {ctx: None for ctx in context_ids}
+        r.raise_for_status()
+        resp = CentroidsResponse.model_validate(r.json())
+        try:
+            return verify_and_decrypt_centroids_response(
+                materials, resp, expected_oracle_did,
+            )
+        except WireError:
+            return {ctx: None for ctx in context_ids}
+
+    def upload_encrypted_centroids(
+        self,
+        owner_identity: Identity,
+        context_id: ContextId,
+        encrypted_blob: bytes,
+    ) -> None:
+        nonce = os.urandom(16)
+        ts_ns = _time.time_ns()
+        blob_b64 = _b64(encrypted_blob)
+        canonical = (
+            context_id.encode()
+            + b"\x00"
+            + blob_b64.encode()
+            + b"\x00"
+            + nonce
+            + ts_ns.to_bytes(8, "big", signed=False)
+        )
+        sig = owner_identity.sign(canonical)
+        body = {
+            "context_id": context_id,
+            "encrypted_blob_b64": blob_b64,
+            "owner_did": owner_identity.did,
+            "nonce_b64": _b64(nonce),
+            "timestamp_ns": ts_ns,
+            "signature_b64": _b64(sig),
+        }
+        r = self._client.post("/upload-encrypted-centroids", json=body)
+        r.raise_for_status()
 
     def info(self) -> dict:
         r = self._client.get("/info")

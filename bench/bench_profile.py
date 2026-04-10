@@ -68,12 +68,15 @@ def main():
     )
     oracle_client = TestClient(oracle_app)
 
-    bootstrap_context(
+    bootstrap_result = bootstrap_context(
         storage=storage, context_id=CTX,
         owner_identity=owner, oracle_endpoint="http://oracle.local",
         oracle_did=oracle_id.did,
         vectors=doc_vecs, ids=np.arange(len(doc_vecs), dtype=np.int64),
         master_key=master, nlist=NLIST,
+    )
+    oracle_app.state.core.store_encrypted_centroids(
+        CTX, bootstrap_result.encrypted_centroids,
     )
     graph = LightConeGraph()
     graph.add_context(CTX)
@@ -102,12 +105,17 @@ def main():
         regs = storage.list_contexts()
         timings["1. list_contexts"].append(time.perf_counter() - t0)
 
-        # 2. get_centroids per context
+        # 2. request centroids from oracle (per context)
         t0 = time.perf_counter()
         centroids_by_ctx = {}
+        oc = HttpOracleClient(client=oracle_client)
         for r in regs:
-            centroids_by_ctx[r.context_id] = storage.get_centroids(r.context_id)
-        timings["2. get_centroids (per ctx)"].append(time.perf_counter() - t0)
+            result = oc.request_centroids(owner, oracle_id.did, [r.context_id])
+            blob = result.get(r.context_id)
+            if blob is not None:
+                from flare.bootstrap import deserialize_centroids
+                centroids_by_ctx[r.context_id] = deserialize_centroids(blob)
+        timings["2. request_centroids (per ctx)"].append(time.perf_counter() - t0)
 
         # 3. centroid distance / topk
         t0 = time.perf_counter()

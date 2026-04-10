@@ -25,8 +25,39 @@ The paper is now structured around the finished FLARE system rather than the dev
 
 - Real hardware TEE integration (requires SGX/SEV).
 - On-chain ledger backing (requires Ceramic / Ethereum L2 deployment).
-- Centroid topology mitigation (calibration research).
+- Centroid noise / locality-preserving hashing (calibration research; a second layer on top of oracle-gated centroids).
 - Token incentives + slashing (separate paper).
 - Forward illumination via a learned predictive model (the deterministic constant-width padding covers the same security shape).
+
+## v1.1 — Oracle-gated encrypted centroids (A-3 mitigation)
+
+Centroid topology leakage (A-3) is now fully mitigated in the implementation, not merely designed. Centroids are encrypted at bootstrap under HKDF-derived centroid keys and delivered to authorized queriers via the oracle's ECIES + Ed25519 wire protocol. Storage returns HTTP 403 for centroid requests. The query pipeline runs light-cone authorization *before* centroid routing, so centroids are never requested for unauthorized contexts.
+
+**Code changes:**
+
+- `flare/crypto.py`: `derive_centroid_key()` with distinct HKDF info prefix `flare/v1/centroids\x00`.
+- `flare/wire.py`: `CentroidsRequest`/`CentroidsResponse` wire types and full ECIES encrypt/verify functions.
+- `flare/oracle/core.py`: `store_encrypted_centroids()`, `issue_centroids()` methods.
+- `flare/oracle/service.py`: `POST /request-centroids`, `POST /upload-encrypted-centroids` endpoints.
+- `flare/oracle/client.py`: `request_centroids()`, `upload_encrypted_centroids()` on `HttpOracleClient`.
+- `flare/bootstrap.py`: `_serialize_centroids()`, `deserialize_centroids()`, `BootstrapResult.encrypted_centroids`.
+- `flare/query.py`: `_get_centroids()` fetches from oracle; pipeline reordered (light-cone → centroid routing).
+- `flare/storage/service.py`: `GET /centroids` returns 403.
+- `tests/test_centroid_gate.py`: new test file pinning storage 403, unauthorized denial, authorized delivery, and end-to-end routing.
+
+**Paper changes:**
+
+- §2 Threat model: "plaintext centroids" → "encrypted centroid blobs"; out-of-scope bullet updated.
+- §3.1 Architecture overview: "routes by plaintext centroids" → "routes by oracle-gated centroids".
+- §3.2 Data flow diagram: reordered to show light-cone → oracle centroid request → routing → key issuance.
+- §3.4 Partitioned encrypted IVF: describes encrypted centroid delivery.
+- §4 Process topology: "Centroids public" → "Encrypted centroids / oracle-gated".
+- §5.3 Cache table: routing cache now holds "Decrypted centroids + registrations" with oracle-gated security.
+- §7 Limitations: A-3 bullet rewritten from "partially mitigated by near-term extension" to implemented description.
+
+**Security register:**
+
+- A-3 status: "accepted (near-term mitigation designed)" → "mitigated".
+- O-5 updated to note primary mitigation is implemented.
 
 Each is documented in §7 Limitations and `docs/analysis/security.md` with reasoning.

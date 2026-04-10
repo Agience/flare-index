@@ -2,9 +2,9 @@
 
 A coordinator oracle uses `PeerShareFetcher` to gather K-1 Shamir
 shares from peer oracles. Fetches run in parallel via a thread pool.
-The fetcher accepts an arbitrary `BatchIssueKeyRequest` (the inner
-querier batch the coordinator received) and returns a list of
-`Share` objects (one per cooperating peer).
+The fetcher accepts a ``BatchIssueKeyRequest`` or ``CentroidsRequest``
+(the inner querier request the coordinator received) and returns a
+list of ``Share`` objects (one per cooperating peer).
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from typing import Callable, Optional
 import httpx
 
 from ..identity import Identity
-from ..wire import BatchIssueKeyRequest
 from .peer_wire import (
     PeerShareResponse,
     build_peer_request,
@@ -59,7 +58,7 @@ class PeerShareFetcher:
         self.needed = needed
         self.max_workers = max_workers or max(2, len(peers))
 
-    def __call__(self, original_request: BatchIssueKeyRequest) -> list[Share]:
+    def __call__(self, original_request) -> list[Share]:
         if self.needed <= 0:
             return []
         materials = build_peer_request(self.coord_identity, original_request)

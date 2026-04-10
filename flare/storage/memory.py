@@ -2,7 +2,8 @@
 
 Holds three things per context:
 
-1. **Plaintext centroids** — public, used by the query node for routing.
+1. **Centroids** — stored for registration; public endpoint gated (403).
+   Centroid maps are served to authorized queriers via the oracle.
 2. **Encrypted cells** — opaque ciphertext, useless without an
    oracle-issued cell key.
 3. **Registration metadata** — owner DID, oracle endpoint, dim, nlist.

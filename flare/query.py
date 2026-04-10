@@ -46,7 +46,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .bootstrap import deserialize_cell
+from .bootstrap import deserialize_cell, deserialize_centroids
 from .crypto import EncryptedCell, decrypt_cell
 from .identity import Identity
 from .lightcone import LightConeGraph
@@ -148,13 +148,43 @@ class FlareQueryEngine:
                 self._registrations_cache = self.storage.list_contexts()
             return self._registrations_cache
 
-    def _get_centroids(self, ctx: ContextId) -> np.ndarray:
-        if not self.cache_enabled:
-            return self.storage.get_centroids(ctx)
-        with self._cache_lock:
-            if ctx not in self._centroids_cache:
-                self._centroids_cache[ctx] = self.storage.get_centroids(ctx)
-            return self._centroids_cache[ctx]
+    def _get_centroids(self, identity: Identity, ctx: ContextId) -> np.ndarray:
+        """Fetch centroids for a context from the oracle (not storage).
+
+        Centroids are gated by the same authorization boundary as cell
+        keys: the oracle checks the requester's grant before returning
+        the centroid map via ECIES. An unauthorized querier never sees
+        the cluster structure.
+        """
+        if self.cache_enabled:
+            with self._cache_lock:
+                cached = self._centroids_cache.get(ctx)
+            if cached is not None:
+                return cached
+
+        reg = self._get_registration(ctx)
+        # Try each oracle endpoint in order (same failover pattern
+        # as cell-key issuance).
+        for endpoint in reg.oracle_endpoints:
+            try:
+                client = self.oracle_resolver(endpoint.url)
+            except KeyError:
+                continue
+            try:
+                result = client.request_centroids(
+                    identity, endpoint.oracle_did, [ctx],
+                )
+            except Exception:
+                continue
+            blob = result.get(ctx)
+            if blob is not None:
+                arr = deserialize_centroids(blob)
+                if self.cache_enabled:
+                    with self._cache_lock:
+                        self._centroids_cache[ctx] = arr
+                return arr
+        # All endpoints failed or denied — return empty.
+        return np.zeros((0, 0), dtype=np.float32)
 
     def _get_registration(self, ctx: ContextId) -> ContextRegistration:
         if not self.cache_enabled:
@@ -166,14 +196,26 @@ class FlareQueryEngine:
 
     # ----- centroid routing -----
 
-    def _candidate_cells(self, query: np.ndarray, nprobe: int) -> list[CellRef]:
+    def _candidate_cells(
+        self, identity: Identity, query: np.ndarray, nprobe: int,
+        authorized: set[ContextId],
+    ) -> list[CellRef]:
+        """Route the query vector to the nearest centroids.
+
+        Only considers contexts the querier is authorized for — the
+        oracle will deny centroid requests for unauthorized contexts,
+        and we avoid wasting nprobe budget on contexts that will be
+        filtered anyway.
+        """
         if query.ndim == 1:
             query = query.reshape(1, -1)
         query = query.astype(np.float32)
         scored: list[tuple[float, CellRef]] = []
         for reg in self._get_registrations():
-            centroids = self._get_centroids(reg.context_id)
-            if centroids.shape[0] == 0:
+            if reg.context_id not in authorized:
+                continue
+            centroids = self._get_centroids(identity, reg.context_id)
+            if centroids.ndim < 2 or centroids.shape[0] == 0:
                 continue
             d = np.linalg.norm(centroids - query, axis=1)
             for cluster_id, dist in enumerate(d):
@@ -185,10 +227,10 @@ class FlareQueryEngine:
         out: list[CellRef] = []
         for ctx in authorized_contexts:
             try:
-                centroids = self.storage.get_centroids(ctx)
+                reg = self._get_registration(ctx)
             except Exception:
                 continue
-            for cluster_id in range(centroids.shape[0]):
+            for cluster_id in range(reg.nlist):
                 out.append(CellRef(ctx, cluster_id))
         return out
 
@@ -287,14 +329,19 @@ class FlareQueryEngine:
         del now  # captured by the wire layer at request build time
         trace = QueryTrace()
 
-        # Stage 2: centroid routing
-        candidates = self._candidate_cells(query, nprobe)
-        trace.candidate_cells = list(candidates)
-
-        # Stage 3: light-cone filter
+        # Stage 2: light-cone filter — determine authorized contexts
+        # before centroid routing so that centroids (which are now
+        # oracle-gated) are only requested for reachable contexts.
         authorized = self.lightcone.authorized_contexts(identity.did)
         trace.authorized_contexts = set(authorized)
-        filtered = [c for c in candidates if c.context_id in authorized]
+
+        # Stage 3: centroid routing across authorized contexts only.
+        candidates = self._candidate_cells(identity, query, nprobe, authorized)
+        trace.candidate_cells = list(candidates)
+
+        # All candidates are already from authorized contexts (routing
+        # was restricted to authorized set), so no further filter needed.
+        filtered = candidates
 
         # Stage 3.5: pad to constant width with authorized noise cells.
         padded, padding_set = self._pad_to_width(

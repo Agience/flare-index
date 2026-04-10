@@ -12,8 +12,10 @@ Steps:
    under HKDF-derived per-cell key, with `(context_id:cluster_id)`
    AAD binding.
 4. Register the context with storage (owner DID, oracle endpoint, dim,
-   nlist) and upload the public centroids.
+   nlist) and upload centroids to storage for backward compat.
 5. Upload each encrypted cell to storage.
+6. Encrypt centroid map under HKDF-derived centroid key and return in
+   the BootstrapResult for oracle injection.
 
 After this returns, the master key can — in principle — be moved into
 the oracle process and dropped from the bootstrap process. The Phase 1
@@ -30,7 +32,7 @@ from typing import Optional
 import faiss  # type: ignore
 import numpy as np
 
-from .crypto import derive_cell_key, encrypt_cell
+from .crypto import derive_cell_key, derive_centroid_key, encrypt_cell
 from .identity import Identity
 from .storage.client import StorageClient
 from .storage.memory import ContextRegistration, OracleEndpoint
@@ -49,12 +51,23 @@ def deserialize_cell(blob: bytes) -> tuple[np.ndarray, np.ndarray]:
     return data["vectors"], data["ids"]
 
 
+def _serialize_centroids(centroids: np.ndarray) -> bytes:
+    buf = io.BytesIO()
+    np.save(buf, centroids.astype(np.float32), allow_pickle=False)
+    return buf.getvalue()
+
+
+def deserialize_centroids(blob: bytes) -> np.ndarray:
+    return np.load(io.BytesIO(blob), allow_pickle=False)
+
+
 @dataclass
 class BootstrapResult:
     context_id: ContextId
     nlist: int
     n_vectors: int
     n_cells: int
+    encrypted_centroids: bytes = b""  # AES-GCM blob for oracle ingestion
 
 
 def bootstrap_context(
@@ -96,6 +109,17 @@ def bootstrap_context(
     _, assign = km.index.search(vectors, 1)
     assign = assign.reshape(-1)
 
+    # Encrypt centroids under a context-specific key derived from the
+    # master key. The encrypted blob is stored in the oracle (not in
+    # public storage) and delivered to authorized queriers via ECIES.
+    # ANALYSIS: see docs/analysis/security.md A-3.
+    centroids_npy = _serialize_centroids(centroids)
+    centroid_key = derive_centroid_key(master_key, context_id)
+    aad = f"centroids:{context_id}".encode("utf-8")
+    encrypted_centroids_cell = encrypt_cell(centroid_key, centroids_npy, associated=aad)
+    encrypted_centroids_blob = encrypted_centroids_cell.to_bytes()
+    del centroid_key
+
     storage.register_context(
         ContextRegistration(
             context_id=context_id,
@@ -129,4 +153,5 @@ def bootstrap_context(
         nlist=nlist,
         n_vectors=n,
         n_cells=n_cells,
+        encrypted_centroids=encrypted_centroids_blob,
     )

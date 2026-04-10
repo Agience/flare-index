@@ -72,8 +72,8 @@ def test_anonymous_reads_still_work():
     client.put_cell("ctx_a", 0, b"ciphertext", owner_identity=alice)
     # Reads do not require any identity.
     assert client.get_cell("ctx_a", 0) == b"ciphertext"
-    centroids = client.get_centroids("ctx_a")
-    assert centroids.shape == (2, 4)
+    # Centroids are now oracle-gated (HTTP 403 from storage), so we
+    # only verify registration reads.
     assert client.get_registration("ctx_a").oracle_did == oracle.did
 
 

@@ -28,7 +28,7 @@ def test_padding_caps_at_pool_size(flare_stack):
     hits, trace = s.engine.search(s.alice, s.av[0], k=3, nprobe=2, now=datetime(2026, 1, 1))
     # Alice's total authorized cells across all contexts she can reach.
     total_cells = sum(
-        s.storage.get_centroids(reg.context_id).shape[0]
+        reg.nlist
         for reg in s.storage.list_contexts()
         if reg.context_id in s.graph.authorized_contexts(s.alice.did)
     )

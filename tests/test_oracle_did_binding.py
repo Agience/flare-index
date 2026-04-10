@@ -82,7 +82,13 @@ def test_failover_around_a_single_rogue_endpoint(phase2_stack):
 
 def test_query_engine_denies_when_every_endpoint_is_rogue(phase2_stack):
     """If every registered endpoint is replaced with a rogue (different
-    signing DID), the query engine denies every Alice cell."""
+    signing DID), the query engine denies every Alice cell.
+
+    With centroid gating, the rogue oracle also can't provide valid
+    centroids (DID mismatch on the ECIES response), so no Alice cells
+    are even routed. The security property is the same: no Alice data
+    leaks.
+    """
     s = phase2_stack
     rogue_id, rogue_client = _build_rogue(s)
 
@@ -101,4 +107,8 @@ def test_query_engine_denies_when_every_endpoint_is_rogue(phase2_stack):
     )
     hits, trace = engine.search(s.alice, s.av[0], k=3, nprobe=4, now=datetime(2026, 1, 1))
     assert all(h.context_id != "workspace_alice" for h in hits)
-    assert any(c.context_id == "workspace_alice" for c in trace.oracle_denied)
+    # The rogue can't provide valid centroids either, so no Alice
+    # cells are routed — oracle_denied may be empty (no cells to deny)
+    # OR populated (if routing somehow produced candidates). Either way
+    # no Alice oracle_granted entries must exist.
+    assert not any(c.context_id == "workspace_alice" for c in trace.oracle_granted)

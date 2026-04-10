@@ -144,7 +144,7 @@ def _run(label: str, build_fn, *, padding_width: int = 0) -> dict:
     else:
         owner, _all_ids, master, storage, oracle_test_client, oracle_id = build_fn()
 
-    bootstrap_context(
+    result = bootstrap_context(
         storage=storage,
         context_id=CTX,
         owner_identity=owner,
@@ -153,6 +153,10 @@ def _run(label: str, build_fn, *, padding_width: int = 0) -> dict:
         vectors=v, ids=ids,
         master_key=master,
         nlist=NLIST,
+    )
+    # Inject encrypted centroids into the oracle core(s).
+    oracle_test_client.app.state.core.store_encrypted_centroids(
+        CTX, result.encrypted_centroids,
     )
 
     graph = LightConeGraph()

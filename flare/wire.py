@@ -558,3 +558,229 @@ def verify_and_decrypt_batch_response(
             continue
         out.append(IssuedCellKey(key=key, valid_until_ns=valid_until))
     return out
+
+
+# =====================================================================
+# Centroid request protocol (oracle-gated centroid delivery)
+# =====================================================================
+# Centroids are gated by the same authorization boundary as cell keys.
+# An unauthorized querier never sees the cluster structure. The query
+# node requests centroid maps from the oracle instead of fetching them
+# from storage in plaintext.
+#
+# ANALYSIS: see docs/analysis/security.md A-3.
+# =====================================================================
+
+
+def _canonical_centroids_request_bytes(
+    requester_did: str,
+    context_ids: list[ContextId],
+    eph_pub: bytes,
+    timestamp_ns: int,
+    nonce: bytes,
+) -> bytes:
+    parts: list[bytes] = [
+        requester_did.encode("utf-8"),
+        len(context_ids).to_bytes(4, "big", signed=False),
+    ]
+    for ctx in context_ids:
+        parts.append(ctx.encode("utf-8"))
+    parts.extend([
+        eph_pub,
+        timestamp_ns.to_bytes(8, "big", signed=False),
+        nonce,
+    ])
+    out = bytearray()
+    for p in parts:
+        out += len(p).to_bytes(4, "big", signed=False)
+        out += p
+    return bytes(out)
+
+
+class CentroidsRequest(BaseModel):
+    requester_did: str
+    context_ids: list[str]
+    eph_pub_b64: str
+    timestamp_ns: int
+    nonce_b64: str
+    signature_b64: str
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_centroids_request_bytes(
+            self.requester_did,
+            self.context_ids,
+            _b64d(self.eph_pub_b64),
+            self.timestamp_ns,
+            _b64d(self.nonce_b64),
+        )
+
+
+class CentroidsEntry(BaseModel):
+    context_id: str
+    granted: bool
+    nonce_b64: Optional[str] = None
+    ciphertext_b64: Optional[str] = None
+    denied_reason: Optional[str] = None
+
+
+class CentroidsResponse(BaseModel):
+    oracle_did: str
+    oracle_eph_pub_b64: str
+    entries: list[CentroidsEntry]
+    signature_b64: str
+
+    def canonical_bytes(self, request_canonical: bytes) -> bytes:
+        parts: list[bytes] = [
+            request_canonical,
+            self.oracle_did.encode("utf-8"),
+            _b64d(self.oracle_eph_pub_b64),
+            len(self.entries).to_bytes(4, "big", signed=False),
+        ]
+        for e in self.entries:
+            parts.append(e.context_id.encode("utf-8"))
+            parts.append(b"\x01" if e.granted else b"\x00")
+            if e.granted:
+                parts.append(_b64d(e.nonce_b64 or ""))
+                parts.append(_b64d(e.ciphertext_b64 or ""))
+            else:
+                parts.append((e.denied_reason or "").encode("utf-8"))
+        out = bytearray()
+        for p in parts:
+            out += len(p).to_bytes(4, "big", signed=False)
+            out += p
+        return bytes(out)
+
+
+@dataclass
+class SignedCentroidsRequestMaterials:
+    request: CentroidsRequest
+    eph_priv: X25519PrivateKey
+
+
+def build_centroids_request(
+    identity: Identity,
+    context_ids: list[ContextId],
+    *,
+    now_ns: Optional[int] = None,
+) -> SignedCentroidsRequestMaterials:
+    eph_priv, eph_pub = x25519_keypair()
+    now_ns = now_ns if now_ns is not None else time.time_ns()
+    nonce = os.urandom(NONCE_BYTES)
+    canonical = _canonical_centroids_request_bytes(
+        identity.did, context_ids, eph_pub, now_ns, nonce,
+    )
+    sig = identity.sign(canonical)
+    req = CentroidsRequest(
+        requester_did=identity.did,
+        context_ids=context_ids,
+        eph_pub_b64=_b64(eph_pub),
+        timestamp_ns=now_ns,
+        nonce_b64=_b64(nonce),
+        signature_b64=_b64(sig),
+    )
+    return SignedCentroidsRequestMaterials(request=req, eph_priv=eph_priv)
+
+
+def verify_centroids_request(
+    req: CentroidsRequest,
+    nonce_cache: NonceCache,
+    *,
+    now_ns: Optional[int] = None,
+) -> None:
+    now_ns = now_ns if now_ns is not None else time.time_ns()
+    if abs(now_ns - req.timestamp_ns) > CLOCK_SKEW_NS:
+        raise WireError("timestamp outside skew window")
+    if not req.context_ids:
+        raise WireError("empty centroids request")
+    nonce = _b64d(req.nonce_b64)
+    if len(nonce) != NONCE_BYTES:
+        raise WireError("bad nonce length")
+    if not nonce_cache.check_and_record(nonce, now_ns):
+        raise WireError("nonce replay detected")
+    sig = _b64d(req.signature_b64)
+    if not verify_ed25519(req.requester_did, req.canonical_bytes(), sig):
+        raise WireError("invalid signature")
+
+
+def encrypt_and_sign_centroids_response(
+    req: CentroidsRequest,
+    centroid_blobs: list[Optional[bytes]],
+    denied_reasons: list[Optional[str]],
+    oracle_identity: Identity,
+) -> CentroidsResponse:
+    if len(centroid_blobs) != len(req.context_ids) or len(denied_reasons) != len(req.context_ids):
+        raise ValueError("centroid_blobs / denied_reasons must align with context_ids")
+
+    requester_eph_pub = x25519_pubkey_from_bytes(_b64d(req.eph_pub_b64))
+    oracle_eph_priv, oracle_eph_pub = x25519_keypair()
+    shared = oracle_eph_priv.exchange(requester_eph_pub)
+    sym = _ecies_derive_key(shared)
+    request_canonical = req.canonical_bytes()
+    aesgcm = AESGCM(sym)
+
+    entries: list[CentroidsEntry] = []
+    for idx, blob in enumerate(centroid_blobs):
+        ctx = req.context_ids[idx]
+        if blob is None:
+            entries.append(CentroidsEntry(
+                context_id=ctx, granted=False,
+                denied_reason=denied_reasons[idx] or "denied",
+            ))
+            continue
+        nonce = os.urandom(ECIES_NONCE_BYTES)
+        aad = request_canonical + ctx.encode("utf-8")
+        ct = aesgcm.encrypt(nonce, blob, aad)
+        entries.append(CentroidsEntry(
+            context_id=ctx, granted=True,
+            nonce_b64=_b64(nonce), ciphertext_b64=_b64(ct),
+        ))
+
+    response = CentroidsResponse(
+        oracle_did=oracle_identity.did,
+        oracle_eph_pub_b64=_b64(oracle_eph_pub),
+        entries=entries,
+        signature_b64="",
+    )
+    canonical_resp = response.canonical_bytes(request_canonical)
+    response.signature_b64 = _b64(oracle_identity.sign(canonical_resp))
+    return response
+
+
+def verify_and_decrypt_centroids_response(
+    materials: SignedCentroidsRequestMaterials,
+    response: CentroidsResponse,
+    expected_oracle_did: str,
+) -> dict[ContextId, Optional[bytes]]:
+    """Verify oracle signature and ECIES-decrypt centroid blobs.
+
+    Returns {context_id: plaintext_npy_bytes | None}.
+    """
+    if response.oracle_did != expected_oracle_did:
+        raise WireError(
+            f"oracle DID mismatch: expected {expected_oracle_did}, got {response.oracle_did}"
+        )
+    request_canonical = materials.request.canonical_bytes()
+    canonical_resp = response.canonical_bytes(request_canonical)
+    sig = _b64d(response.signature_b64)
+    if not verify_ed25519(response.oracle_did, canonical_resp, sig):
+        raise WireError("invalid oracle centroids response signature")
+
+    oracle_eph_pub = x25519_pubkey_from_bytes(_b64d(response.oracle_eph_pub_b64))
+    shared = materials.eph_priv.exchange(oracle_eph_pub)
+    sym = _ecies_derive_key(shared)
+    aesgcm = AESGCM(sym)
+
+    out: dict[ContextId, Optional[bytes]] = {}
+    for entry in response.entries:
+        if not entry.granted:
+            out[entry.context_id] = None
+            continue
+        nonce = _b64d(entry.nonce_b64 or "")
+        ct = _b64d(entry.ciphertext_b64 or "")
+        aad = request_canonical + entry.context_id.encode("utf-8")
+        try:
+            plaintext = aesgcm.decrypt(nonce, ct, aad)
+        except Exception as e:
+            raise WireError(f"centroid ciphertext failed AES-GCM for {entry.context_id}: {e}")
+        out[entry.context_id] = plaintext
+    return out

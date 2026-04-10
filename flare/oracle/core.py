@@ -25,7 +25,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Callable, Optional
 
-from ..crypto import derive_cell_key
+from ..crypto import derive_cell_key, derive_centroid_key
 from ..ledger.client import GrantLedgerClient
 from ..sealed import SecureBytes
 from ..types import ClusterId, ContextId, PrincipalId
@@ -87,10 +87,106 @@ class OracleCore:
         self._peer_share_fetcher = peer_share_fetcher
         self.issued_count = 0
         self.denied_count = 0
+        # Encrypted centroid blobs per context, keyed by context_id.
+        # Each blob is AES-256-GCM(centroid_key, centroids_npy_bytes)
+        # where centroid_key = derive_centroid_key(master_key, ctx).
+        # Stored at bootstrap time; decrypted on demand for authorized
+        # queriers inside issue_centroids().
+        self._encrypted_centroids: dict[ContextId, bytes] = {}
 
     @property
     def is_threshold(self) -> bool:
         return self._share is not None
+
+    # ----- encrypted centroid management -----
+
+    def store_encrypted_centroids(
+        self, context_id: ContextId, encrypted_blob: bytes,
+    ) -> None:
+        """Store an encrypted centroid blob for later delivery.
+
+        Called at bootstrap time. The blob is
+        ``encrypt_cell(derive_centroid_key(master_key, ctx), npy_bytes)``.
+        """
+        self._encrypted_centroids[context_id] = encrypted_blob
+
+    def issue_centroids(
+        self,
+        requester: PrincipalId,
+        context_ids: list[ContextId],
+        now: datetime,
+        *,
+        original_request: Optional[object] = None,
+    ) -> list[Optional[bytes]]:
+        """Return decrypted centroid npy bytes for each authorized context.
+
+        Authorization follows the same path as cell-key issuance:
+        owner is always authorized; otherwise a valid grant is needed.
+        In threshold mode, the master key is reconstructed from peer
+        shares (same as decide_batch).
+        """
+        from ..crypto import decrypt_cell as _decrypt_cell
+        from ..crypto import EncryptedCell as _EncryptedCell
+
+        # Stage A: per-context authorization.
+        decisions: list[OracleDecision] = []
+        for ctx in context_ids:
+            if requester == self.owner:
+                decisions.append(OracleDecision.OWNER)
+            else:
+                grant = self._ledger.find_valid(self.owner, requester, ctx, now)
+                decisions.append(
+                    OracleDecision.GRANTED if grant is not None
+                    else OracleDecision.DENIED_NO_GRANT
+                )
+
+        if not any(d in (OracleDecision.OWNER, OracleDecision.GRANTED) for d in decisions):
+            return [None] * len(context_ids)
+
+        # Stage B: obtain master key (same logic as decide_batch).
+        reconstructed: Optional[SecureBytes] = None
+        master_key_view: Optional[bytes] = None
+        threshold_failed = False
+        try:
+            if self._master_key is not None:
+                master_key_view = self._master_key
+            else:
+                assert self._share is not None and self._threshold_k is not None
+                shares: list[Share] = [self._share]
+                if self._threshold_k > 1:
+                    if self._peer_share_fetcher is None or original_request is None:
+                        threshold_failed = True
+                    else:
+                        try:
+                            peer_shares = self._peer_share_fetcher(original_request)
+                        except Exception:
+                            peer_shares = []
+                        shares.extend(peer_shares)
+                if len(shares) < (self._threshold_k or 1):
+                    threshold_failed = True
+                else:
+                    reconstructed = SecureBytes(reconstruct_secret(shares[: self._threshold_k]))
+                    master_key_view = reconstructed.view()
+
+            results: list[Optional[bytes]] = []
+            for ctx, decision in zip(context_ids, decisions):
+                if decision not in (OracleDecision.OWNER, OracleDecision.GRANTED) or threshold_failed:
+                    results.append(None)
+                    continue
+                enc_blob = self._encrypted_centroids.get(ctx)
+                if enc_blob is None:
+                    results.append(None)
+                    continue
+                assert master_key_view is not None
+                centroid_key = derive_centroid_key(master_key_view, ctx)
+                cell = _EncryptedCell.from_bytes(enc_blob)
+                aad = f"centroids:{ctx}".encode("utf-8")
+                plaintext = _decrypt_cell(centroid_key, cell, associated=aad)
+                results.append(plaintext)
+            return results
+        finally:
+            if reconstructed is not None:
+                reconstructed.clear()
 
     # ----- single-cell decide (kept for tests; production goes through decide_batch) -----
 

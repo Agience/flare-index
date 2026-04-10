@@ -30,7 +30,7 @@ This paper presents:
 
 **In scope.**
 
-- An adversary with read access to stored ciphertext cells, plaintext centroids, the entire grant ledger (including its hash-chained log), and every byte of the oracle wire protocol — but not to a running oracle process's memory.
+- An adversary with read access to stored ciphertext cells, encrypted centroid blobs, the entire grant ledger (including its hash-chained log), and every byte of the oracle wire protocol — but not to a running oracle process's memory.
 - An adversary issuing queries as an unauthorized principal, with the ability to forge wire requests under any DID they choose.
 - An adversary attempting to replay a captured wire request, peer share request, or storage upload against the same service.
 - An adversary attempting to use a previously-valid grant after `ledger.revoke` returns, including a request signed before the revoke whose cell key the requester is still holding.
@@ -51,7 +51,7 @@ This paper presents:
 - Access-pattern leakage at the granularity of *which contexts* a principal queries. The pad-to-fixed-width mechanism closes leakage of query specificity but not of context-level access patterns; closing the latter requires collapsing per-owner oracles into a single shared oracle, which is out of scope for the design.
 - Side-channels (timing, power) on the decryption node.
 - DoS via centroid spam, ledger spam, or storage spam (operational concern, not in the cryptographic threat model).
-- Centroid topology leakage. Centroids are public by design; the embedding space provides natural high-dimensional obfuscation that has not been formally bounded. Mitigations (Gaussian noise, locality-preserving hashing) are calibration research that we deliberately do not half-implement.
+- Residual centroid topology leakage after oracle compromise. Centroids are encrypted at rest and delivered only to authorized queriers via ECIES through the oracle (§3.4). An adversary who compromises the query node after oracle authorization sees the centroid map for authorized contexts — the same information it already receives via cell keys and decrypted results. Formal bounding of information leakage from centroid geometry in high-dimensional embedding space remains open research.
 - Token-economic incentives and slashing. These are an entire separate paper with their own threat model.
 
 A full enumeration of every observation made while writing the code, with severity, file:line, and status, is in `docs/analysis/security.md`.
@@ -60,7 +60,7 @@ A full enumeration of every observation made while writing the code, with severi
 
 ### 3.1 Architecture overview
 
-FLARE composes five layers, each with a single job. The query layer routes by plaintext centroids; the authorization layer projects the principal's reachable context set; the key issuance layer derives per-cell keys on demand under a threshold quorum; the search layer decrypts and runs ANN inside each authorized cell; the storage layer holds opaque ciphertext.
+FLARE composes five layers, each with a single job. The query layer routes by oracle-gated centroids delivered via ECIES; the authorization layer projects the principal's reachable context set; the key issuance layer derives per-cell keys on demand under a threshold quorum; the search layer decrypts and runs ANN inside each authorized cell; the storage layer holds opaque ciphertext.
 
 ```mermaid
 flowchart TB
@@ -77,15 +77,16 @@ flowchart TB
 ```mermaid
 sequenceDiagram
     participant U as Querier (DID_q)
-    participant R as Routing (centroids)
     participant L as Light Cone
     participant O as Oracle Quorum (Alice's K-of-M)
     participant SD as Encrypted Cells
-    U->>R: query embedding e_q
-    R->>R: pick nearest centroids
-    R->>L: candidate (context, cluster) set
-    L->>L: BFS reachability + path-predicate deny
-    L->>O: cells in authorized contexts
+    U->>L: BFS reachability + path-predicate deny
+    L-->>U: authorized context set
+    U->>O: POST /request-centroids (ECIES + Ed25519)
+    O->>O: ledger check + decrypt centroid blob
+    O-->>U: ECIES-encrypted centroid maps
+    U->>U: route query against centroids → candidate cells
+    U->>O: POST /issue-batch (ECIES + Ed25519 + TTL)
     O->>O: K-of-M peer share-fetch + ledger check + reconstruct
     O-->>U: ECIES-encrypted, Ed25519-signed cell keys with TTL
     U->>SD: fetch ciphertext cells (parallel with oracle round-trip)
@@ -111,7 +112,7 @@ BFS is path-stateful: each frontier element carries the full path that reached i
 
 ### 3.4 Partitioned encrypted IVF
 
-Each context owns an independent IVF partitioning of its vectors. Per-context k-means is computed at bootstrap time (`flare/bootstrap.py`); the centroids are published in plaintext to the storage service so the query node can route; the cluster cells are encrypted with per-cell keys and uploaded as opaque blobs. The owner's master key never leaves the oracle host.
+Each context owns an independent IVF partitioning of its vectors. Per-context k-means is computed at bootstrap time (`flare/bootstrap.py`); the centroids are encrypted under an HKDF-derived centroid key (`derive_centroid_key` in `flare/crypto.py`) and stored on the oracle, which delivers them to authorized queriers via the same ECIES + Ed25519 wire protocol used for cell keys; the cluster cells are encrypted with per-cell keys and uploaded to the storage service as opaque blobs. The owner's master key never leaves the oracle host.
 
 ```python
 # flare/bootstrap.py — bootstrap_context (excerpt)
@@ -211,7 +212,7 @@ The reference implementation is `flare`, a Python package on top of FAISS, NumPy
 
 ```
 make build           # build the image once (~2 min, includes embedding model)
-make test            # 91-test pytest suite (~13 s)
+make test            # 101-test pytest suite (~13 s)
 make showcase        # runnable demo on real text with real embeddings
 make demo-compose    # full multi-container threshold stack
 make bench           # synthetic latency/throughput sweep
@@ -233,7 +234,7 @@ flowchart LR
         CHN[Hash-chained log<br/>signed grants only]
     end
     subgraph ST[Storage service]
-        SC[Centroids public]
+        SC[Encrypted centroids<br/>oracle-gated]
         CC[Encrypted cells]
         REG[Context registry<br/>signed by owner DID<br/>list of oracle endpoints]
     end
@@ -248,8 +249,10 @@ flowchart LR
         OB3[Oracle replica 3<br/>share s_3, DID_o3]
     end
 
-    QE -->|GET /contexts /centroids /cells| ST
+    QE -->|GET /contexts /cells| ST
+    QE -->|POST /request-centroids<br/>Ed25519 + ECIES| OA1
     QE -->|POST /issue-batch<br/>Ed25519 + ECIES + TTL| OA1
+    QE -->|POST /request-centroids<br/>Ed25519 + ECIES| OB1
     QE -->|POST /issue-batch<br/>Ed25519 + ECIES + TTL| OB1
     OA1 <-->|/peer/share<br/>K-1 = 1 needed| OA2
     OA1 <-->|/peer/share<br/>fallback| OA3
@@ -393,22 +396,22 @@ The four latency wins, ranked by contribution:
 
 1. **Oracle-side ledger dedup** — one `find_valid` per `(grantor, requester, ctx)` instead of per cell: ~35 ms saved
 2. **Cell ciphertext cache** on the query node — encrypted blobs are content-addressed and never change without a re-bootstrap: ~50 ms saved
-3. **Routing cache** — `list_contexts`, centroids, and context registrations: ~17 ms saved
+3. **Routing cache** — `list_contexts`, oracle-delivered centroids, and context registrations: ~17 ms saved
 4. **Cell-key cache** within TTL — relevant for sustained query sessions
 
 The three caches have different security profiles:
 
 | Cache | Holds | Security boundary | Invalidation |
 |---|---|---|---|
-| Routing cache | Public metadata (centroids, registrations) | Public by design | Manual: `invalidate_routing()` after re-bootstrap |
+| Routing cache | Decrypted centroids + registrations | Oracle-gated centroids; registrations are public | Manual: `invalidate_routing()` after re-bootstrap |
 | Cell ciphertext cache | AES-GCM ciphertext blobs | Opaque without oracle keys; fail-safe (GCM rejects stale cells on decrypt) | Automatic |
 | Cell-key cache | `IssuedCellKey` per `(cell, requester_did)`, oracle-signed TTL | Bounded by existing oracle-signed `valid_until_ns` | TTL-evicted lazily; explicit: `invalidate_cell_keys()` |
 
-The cell-key cache does not weaken the revocation guarantee: the TTL was always the upper bound on how long an issued key remained useful. A deployment that wants immediate post-revoke effect calls `engine.invalidate_cell_keys()` after a known revocation; otherwise the worst case is one TTL window (default 60 s). The routing and ciphertext caches are unconditionally safe — they hold public metadata and opaque ciphertext respectively. Cache keys include the requester DID, so one principal's keys are never returned to another.
+The cell-key cache does not weaken the revocation guarantee: the TTL was always the upper bound on how long an issued key remained useful. A deployment that wants immediate post-revoke effect calls `engine.invalidate_cell_keys()` after a known revocation; otherwise the worst case is one TTL window (default 60 s). The routing cache holds centroid maps that were delivered by the oracle under the same authorization check as cell keys, plus public context registrations. The centroid portion is oracle-gated at delivery time; once cached, it has the same security profile as cached cell keys and is invalidated by `invalidate_routing()`. The ciphertext cache holds opaque AES-GCM ciphertext. Cache keys include the requester DID, so one principal's keys are never returned to another.
 
 ### 5.4 Properties verified by tests
 
-The 91-test pytest suite covers every security property the paper claims. Selected highlights:
+The 101-test pytest suite covers every security property the paper claims. Selected highlights:
 
 | Property | Test |
 |---|---|
@@ -442,6 +445,7 @@ The 91-test pytest suite covers every security property the paper claims. Select
 | Constant-width batch padding does not leak extra hits | `tests/test_padding.py::test_padding_does_not_leak_extra_hits` |
 | `SecureBytes` round-trip and explicit `clear()` zeroization | `tests/test_sealed_storage.py::*` |
 | `EncryptedFileKeyStore` round-trip; wrong passphrase rejected | `tests/test_sealed_storage.py::test_sealed_file_*` |
+| Oracle-gated centroids: storage returns 403, unauthorized querier denied, authorized querier receives correct centroids | `tests/test_centroid_gate.py::*` |
 | Concurrent queriers under contention with a revoker thread: no post-revoke leak, no crash | `tests/test_concurrent_revoke.py::test_concurrent_queries_during_revoke` |
 | Revocation is immediate for every subsequent oracle request | `tests/test_concurrent_revoke.py::test_revoke_is_immediate_for_subsequent_requests` |
 | Cell-key cache: one principal's cached keys never leak to another | `tests/test_query_cache.py::test_cell_key_cache_does_not_cross_requesters` |
@@ -490,7 +494,7 @@ FLARE as implemented is a working artifact, not a deployment. The remaining gaps
 - **Per-process nonce caches.** The replay nonce caches for the wire protocol and the peer protocol live in process memory and are lost on restart. A real deployment shares nonce state across replicas via a small coordination service.
 - **TTL relies on coordinated wall-clock time.** Both oracle and querier need NTP. A monotonic-clock alternative requires cross-process clock synchronization.
 - **Failover order is deterministic** (registration order). A production deployment would round-robin or hash-on-querier across the registered endpoints.
-- **Centroid topology leakage is partially mitigated by a near-term extension.** In the current prototype, centroids are stored in plaintext in the storage service so the query node can route without holding master keys. An adversary with read access to storage therefore learns the semantic cluster structure of each context: cluster centers reveal the topical distribution of a context, and centroid-to-centroid similarity reveals which contexts share semantic territory. This does not expose any document content — cells are opaque without oracle keys — but it does leak the *shape* of what a data owner has indexed. In practice, in high-dimensional embedding space (D ≥ 256), individual centroid vectors are not directly invertible to text by existing embedding inversion techniques, and the curse of dimensionality makes nearest-neighbor inference noisy. However, this is informal intuition, not a formal bound. A concrete near-term extension closes this gap without changing the routing architecture: store centroid maps encrypted on the grant ledger (under the oracle's master key) and deliver them to the query node inside the existing oracle key-issuance response, which is already end-to-end encrypted and origin-authenticated via ECIES + Ed25519. The query node receives the centroid map and routes locally as it does today — the oracle remains a passive key dispenser, not an active router, and no extra round-trip is introduced, since key issuance and centroid delivery happen in the same request. Centroids become gated by the same authorization boundary as cell keys: an unauthorized querier never sees the cluster structure. The ledger storage cost is modest — 32 centroids × 384 dimensions × 4 bytes ≈ 50 KB per context. The only new cost is on the cold path: routing requires an oracle round-trip before the first query (instead of a direct storage fetch), but this round-trip already occurs for key issuance, so it is not additive. Three additional mitigations exist at different cost levels and compose orthogonally: (1) add calibrated Gaussian noise to the delivered centroids, preserving routing quality while degrading adversarial reconstruction in the event the query node is compromised; (2) use locality-preserving hashing to partition without exposing centroid vectors at all; (3) treat residual leakage as acceptable and formally bound it for the embedding model in use. FLARE currently takes the third position by default; the encrypted-ledger extension above is the recommended first upgrade step.
+- **Centroid topology leakage is closed for storage-level adversaries; residual exposure on authorized query nodes is accepted.** Centroid maps are encrypted at bootstrap time under an HKDF-derived centroid key (`derive_centroid_key` in `flare/crypto.py`) and stored on the oracle as AES-256-GCM ciphertext with AAD binding to the context ID. The oracle delivers centroid maps to authorized queriers through the same ECIES + Ed25519 wire protocol used for cell keys (`/request-centroids` endpoint in `flare/oracle/service.py`); the storage service returns HTTP 403 for centroid requests. An unauthorized querier never sees the cluster structure: the oracle runs the same ledger authorization check before issuing centroids as it does before issuing cell keys. The query pipeline runs light-cone authorization *before* centroid routing, so centroid requests are never issued for contexts the querier cannot reach. This is defended by `tests/test_centroid_gate.py`. The only new cost is on the cold path: routing requires an oracle round-trip before the first query (instead of a direct storage fetch), but this round-trip already occurs for key issuance, so it is not additive; the routing cache (`invalidate_routing()`) ensures subsequent queries serve centroids from memory. The residual exposure: an authorized querier, having received centroid maps via the oracle, sees the same cluster geometry it already sees through cell keys and decrypted results. Three additional mitigations compose orthogonally for deployments that want to narrow even this residual: (1) calibrated Gaussian noise on delivered centroids preserves routing quality while degrading adversarial reconstruction if the query node is compromised; (2) locality-preserving hashing partitions without exposing centroid vectors at all; (3) formally bounding the leakage for the embedding model in use.
 - **Indexing is owner-only and currently batch-only; incremental writes and delegated indexing are not implemented.** `bootstrap_context` requires the owner's master key (to derive per-cell encryption keys) and the owner's Ed25519 identity (to sign storage registration and cell-upload requests). There is no write grant concept: storage write authorization is not delegated — only the owner DID associated with a context can write to it. This is by design for the prototype (it eliminates an entire class of rogue-write attacks), but it means a data owner cannot delegate indexing to an agent without handing it their master key and signing identity, which re-introduces the key-custody problem the oracle is designed to solve. A sketch of a write-grant extension exists: the oracle could issue short-lived write tokens (analogous to cell keys) that authorize a specific agent to upload a specific encrypted cell blob, without ever exposing the master key to that agent. The agent would encrypt the cell itself using a key derived from a token the oracle provides, then upload the signed blob; the oracle would verify the upload token before releasing the encryption key to the agent. This maps naturally onto the existing oracle key-issuance protocol but in reverse and is not implemented. Additionally, adding vectors to an existing context currently requires a full re-bootstrap: k-means is retrained, all cells are re-encrypted with new keys, and the storage service is updated. Incremental IVF updates (inserting into existing cells without retraining centroids) are straightforward when centroids are stable but require careful handling of the encryption layer — new vectors must be encrypted under the existing per-cell key for that cluster, which the oracle can issue as a write token. If the centroid map becomes stale (corpus distribution shifts significantly), a full re-bootstrap is required, which invalidates all cached centroid maps and cell ciphertexts on every query node and requires updating the ledger entry for the context. The routing cache invalidation hook `invalidate_routing()` exists for exactly this case.
 - **The query node remains trusted for result confidentiality.** The query node receives plaintext cell keys from the oracle and decrypts the cell contents locally. It therefore sees the plaintext search results for every query it processes. FLARE's design assumes the query node is the querier's own process — client-side software or a trusted proxy running on the querier's own infrastructure. In that model, the query node is trusted by definition: it *is* the querier. However, if the query engine is deployed as shared infrastructure serving multiple principals (a search proxy, a SaaS gateway), then the operator of that proxy enters the trusted computing base and can observe all queries and all results for all principals it serves. FLARE provides no protection against this. Closing the gap requires either running the query engine inside a TEE (same requirement as the oracle, and the same `ptrace` caveat applies) or using an oblivious construction such as PIR for the in-cell search (three to four orders of magnitude latency cost). The correct operational posture is to run `FlareQueryEngine` as a sidecar on the querier's own node — the sidecar pattern in `docs/production-deployment.md` — rather than as shared infrastructure.
 - **Token incentives + slashing are out of scope.** They are an entire separate paper with their own threat model.

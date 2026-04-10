@@ -24,8 +24,9 @@ what needs to be implemented to swap it.
 FLARE's vector search is split across two phases:
 
 1. **Centroid routing** — at query time, find the K nearest centroids to the
-   query vector. Centroids are plaintext and small (e.g. 8 centroids × 384
-   floats). FAISS `IndexFlatL2.search` does this in microseconds.
+   query vector. Centroids are encrypted at rest and delivered to authorized
+   queriers via the oracle's ECIES protocol (small: e.g. 8 centroids × 384
+   floats ≈ 12 KB per context). FAISS `IndexFlatL2.search` routes in microseconds.
 2. **In-cell ANN** — after a cell is decrypted, brute-force ANN over its
    векторы. FAISS `IndexFlatL2` again, on the decrypted float array.
 
@@ -209,12 +210,14 @@ threads is safe and tested (`tests/test_query_cache.py::test_concurrent_queries_
 
 ### Security analysis of each cache
 
-**Routing cache.** Caches data that is *public by design*. Centroids are the
-plaintext routing primitive; context registrations are owner-signed and
-publicly readable; `list_contexts` is a directory query. No security boundary
-crosses the cache. The only operational concern is staleness after a
-re-bootstrap — call `engine.invalidate_routing()` from the data-owner side
-when a context is re-published.
+**Routing cache.** Caches centroid maps delivered by the oracle via ECIES,
+plus public context registrations. Centroids are oracle-gated: an
+unauthorized querier never receives them. Once cached on the authorized
+query node, centroids have the same security profile as cached cell keys.
+Context registrations are owner-signed and publicly readable. The only
+operational concern is staleness after a re-bootstrap — call
+`engine.invalidate_routing()` from the data-owner side when a context is
+re-published.
 
 **Cell ciphertext cache.** Caches AES-GCM ciphertext. The bytes are opaque
 without an oracle-issued cell key, so caching them on a query node leaks

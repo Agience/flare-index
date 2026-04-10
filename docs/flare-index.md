@@ -70,13 +70,13 @@ No existing system combines all three. Ocean Protocol handles data access econom
 ```
 1. Alice submits query q with embedding e_q
 
-2. Centroid routing (plaintext centroids):
-   e_q compared against cluster centroids → candidate clusters {C3, C7, C12, C15}
-
-3. Light cone traversal (ArangoDB or local graph cache):
+2. Light cone traversal:
    Alice's principal → graph reachability → authorized contexts
-   → Alice can reach contexts that map to clusters {C3, C7, C15}
-   → C12 is NOT in Alice's cone — dropped silently
+
+3. Centroid routing (oracle-gated encrypted centroids):
+   Oracle delivers centroid maps for authorized contexts via ECIES
+   e_q compared against centroids → candidate clusters {C3, C7, C15}
+   → only clusters in authorized contexts are ever considered
 
 4. Oracle key requests (parallel):
    C3 owned by Alice → Alice's oracle issues key immediately (local)
@@ -475,7 +475,7 @@ This reduces — but does not eliminate — access pattern leakage. The residual
 |---|---|---|
 | Compromised oracle quorum (K-of-M) | If K oracles are compromised simultaneously, keys can be derived | Increase K, distribute oracles across jurisdictions |
 | Access pattern analysis | Observer can infer which contexts are queried (not query content) | Constant-width oracle batches, forward illumination padding |
-| Centroid analysis | Public centroids reveal the topology of the vector space | Centroids encode direction/distance, not content. Low information leakage for high-dimensional spaces. |
+| Centroid analysis | Oracle-gated: centroids are encrypted at rest and delivered only to authorized queriers via ECIES. Residual: authorized querier sees centroid geometry (same as cell keys + results). | Noise calibration / locality-preserving hashing as optional second layer. |
 | Embedding inversion | Given a vector, reconstruct the source text | Model-specific attack, not specific to this system. Current models are resistant. |
 | Side-channel on decryption node | Timing/power analysis during cell decryption | Standard side-channel mitigations. TEE for hardened deployments. |
 | Malicious grantor | Owner grants access then substitutes poisoned data in the cluster | Out of scope — data integrity is a separate problem (sign cells with owner key) |
@@ -505,7 +505,7 @@ This reduces — but does not eliminate — access pattern leakage. The residual
 
 2. **Cross-context semantic coherence:** If clusters are context-aligned rather than purely similarity-aligned, do cross-context queries suffer accuracy loss? Hypothesis: minor, because the centroid routing still selects by vector distance. Need to benchmark recall@K vs. standard IVF.
 
-3. **Centroid privacy:** Can an adversary learn meaningful information from the plaintext centroid set? For 1536-dimensional embeddings (OpenAI), centroids are points in high-dimensional space — not human-interpretable. But systematic analysis is needed.
+3. **Centroid privacy:** Centroids are now encrypted at rest and oracle-gated, so a storage-level adversary learns nothing. An authorized querier sees the centroid map, but the same querier already receives cell keys and decrypted search results. Formal bounding of residual information leakage from centroid geometry in high-dimensional embedding space remains open.
 
 4. **Oracle latency at scale:** With 10,000 participants, each with their own oracle, a query that touches 50 contexts requires 50 parallel oracle requests. Is this feasible at p95 < 200ms? Likely yes if oracles are co-located with storage, but needs measurement.
 

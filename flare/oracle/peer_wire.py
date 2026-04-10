@@ -49,6 +49,7 @@ from pydantic import BaseModel
 from ..identity import Identity, verify_ed25519, x25519_keypair, x25519_pubkey_from_bytes
 from ..wire import (
     BatchIssueKeyRequest,
+    CentroidsRequest,
     NonceCache,
     WireError,
     _b64,
@@ -70,7 +71,8 @@ def _len_prefix(parts: list[bytes]) -> bytes:
 
 def _canonical_peer_request_bytes(
     coord_did: str,
-    original_request: BatchIssueKeyRequest,
+    inner_canonical: bytes,
+    inner_sig: bytes,
     eph_pub: bytes,
     timestamp_ns: int,
     nonce: bytes,
@@ -78,8 +80,8 @@ def _canonical_peer_request_bytes(
     return _len_prefix([
         b"flare/v3/peer-share",
         coord_did.encode("utf-8"),
-        original_request.canonical_bytes(),
-        _b64d(original_request.signature_b64),
+        inner_canonical,
+        inner_sig,
         eph_pub,
         timestamp_ns.to_bytes(8, "big", signed=False),
         nonce,
@@ -88,9 +90,11 @@ def _canonical_peer_request_bytes(
 
 class PeerShareRequest(BaseModel):
     coord_oracle_did: str
-    # The original querier's batch request, verbatim, including its
+    # The original querier's request, verbatim, including its
     # querier signature. The peer re-verifies this before releasing.
     original_request: dict
+    # "batch" for BatchIssueKeyRequest, "centroids" for CentroidsRequest.
+    request_type: str = "batch"
     # Coordinator-side per-request ephemeral X25519 pubkey for ECIES.
     eph_pub_b64: str
     timestamp_ns: int
@@ -98,13 +102,23 @@ class PeerShareRequest(BaseModel):
     # Coordinator's Ed25519 signature over the canonical bytes.
     signature_b64: str
 
+    def _inner_model(self):
+        """Reconstruct the typed inner request model."""
+        if self.request_type == "centroids":
+            return CentroidsRequest.model_validate(self.original_request)
+        return BatchIssueKeyRequest.model_validate(self.original_request)
+
     def original(self) -> BatchIssueKeyRequest:
+        """Return inner request as BatchIssueKeyRequest (batch type only)."""
+        assert self.request_type == "batch", "use _inner_model() for generic access"
         return BatchIssueKeyRequest.model_validate(self.original_request)
 
     def canonical_bytes(self) -> bytes:
+        inner = self._inner_model()
         return _canonical_peer_request_bytes(
             self.coord_oracle_did,
-            self.original(),
+            inner.canonical_bytes(),
+            _b64d(inner.signature_b64),
             _b64d(self.eph_pub_b64),
             self.timestamp_ns,
             _b64d(self.nonce_b64),
@@ -136,20 +150,26 @@ class CoordinatorMaterials:
 
 def build_peer_request(
     coord_identity: Identity,
-    original_request: BatchIssueKeyRequest,
+    original_request,
     *,
     now_ns: Optional[int] = None,
 ) -> CoordinatorMaterials:
+    """Build a peer share request wrapping either a batch or centroids request."""
+    request_type = "centroids" if isinstance(original_request, CentroidsRequest) else "batch"
     eph_priv, eph_pub = x25519_keypair()
     now_ns = now_ns if now_ns is not None else time.time_ns()
     nonce = os.urandom(NONCE_BYTES)
     canonical = _canonical_peer_request_bytes(
-        coord_identity.did, original_request, eph_pub, now_ns, nonce,
+        coord_identity.did,
+        original_request.canonical_bytes(),
+        _b64d(original_request.signature_b64),
+        eph_pub, now_ns, nonce,
     )
     sig = coord_identity.sign(canonical)
     req = PeerShareRequest(
         coord_oracle_did=coord_identity.did,
         original_request=original_request.model_dump(),
+        request_type=request_type,
         eph_pub_b64=_b64(eph_pub),
         timestamp_ns=now_ns,
         nonce_b64=_b64(nonce),
@@ -164,11 +184,12 @@ def verify_peer_request(
     allowed_coord_dids: set[str],
     nonce_cache: NonceCache,
     now_ns: Optional[int] = None,
-) -> BatchIssueKeyRequest:
+):
     """Verify a peer share request from a coordinator oracle.
 
     Raises `WireError` on any failure. Returns the inner querier
-    request so the peer can run its own ledger checks against it.
+    request (``BatchIssueKeyRequest`` or ``CentroidsRequest``) so
+    the peer can run its own ledger checks against it.
     """
     now_ns = now_ns if now_ns is not None else time.time_ns()
     if req.coord_oracle_did not in allowed_coord_dids:
@@ -183,8 +204,8 @@ def verify_peer_request(
         raise WireError("invalid coordinator signature")
 
     # Re-verify the querier's original signature so the coordinator
-    # cannot forge a batch the querier never authorized.
-    inner = req.original()
+    # cannot forge a request the querier never authorized.
+    inner = req._inner_model()
     inner_sig = _b64d(inner.signature_b64)
     if not verify_ed25519(inner.requester_did, inner.canonical_bytes(), inner_sig):
         raise WireError("invalid inner querier signature")

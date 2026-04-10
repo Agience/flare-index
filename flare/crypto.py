@@ -55,6 +55,24 @@ def derive_cell_key(master_key: bytes, context_id: ContextId, cluster_id: Cluste
     return hkdf.derive(master_key)
 
 
+def derive_centroid_key(master_key: bytes, context_id: ContextId) -> bytes:
+    """Derive the key used to encrypt centroids for a context.
+
+    Uses a distinct HKDF info prefix so centroid keys never collide
+    with per-cell keys, even for the same (master_key, context_id).
+    """
+    if len(master_key) < 32:
+        raise ValueError("master_key must be at least 32 bytes of entropy")
+    _validate_context_id(context_id)
+    info = b"flare/v1/centroids\x00" + context_id.encode("utf-8")
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=KEY_BYTES,
+        salt=HKDF_SALT,
+        info=info,
+    ).derive(master_key)
+
+
 @dataclass(frozen=True)
 class EncryptedCell:
     nonce: bytes

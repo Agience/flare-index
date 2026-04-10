@@ -166,7 +166,7 @@ def main() -> None:
           f"Ed25519+ECIES wire, TTL-bounded keys, nlist={NLIST}, nprobe={NPROBE})...")
     owner = Identity.generate()
     master, oracle_id, storage, oracle_test_client = _build_inproc_stack(owner)
-    bootstrap_context(
+    result_bs = bootstrap_context(
         storage=storage, context_id=CTX,
         owner_identity=owner,
         oracle_endpoint="http://oracle.local",
@@ -175,6 +175,9 @@ def main() -> None:
         ids=np.arange(n_docs, dtype=np.int64),
         master_key=master,
         nlist=NLIST,
+    )
+    oracle_test_client.app.state.core.store_encrypted_centroids(
+        CTX, result_bs.encrypted_centroids,
     )
     graph = LightConeGraph()
     graph.add_context(CTX)

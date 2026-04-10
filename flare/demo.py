@@ -108,7 +108,7 @@ def main() -> None:
     # 5. Owners bootstrap their contexts.
     av, aids = _vecs(200, dim, seed=1)
     bv, bids = _vecs(200, dim, seed=2)
-    bootstrap_context(
+    alice_result = bootstrap_context(
         storage=storage_client,
         context_id="workspace_alice",
         owner_identity=alice,
@@ -117,7 +117,7 @@ def main() -> None:
         vectors=av, ids=aids,
         master_key=alice_master, nlist=8,
     )
-    bootstrap_context(
+    bob_result = bootstrap_context(
         storage=storage_client,
         context_id="workspace_bob",
         owner_identity=bob,
@@ -125,6 +125,13 @@ def main() -> None:
         oracle_did=bob_oracle_id.did,
         vectors=bv, ids=bids,
         master_key=bob_master, nlist=8,
+    )
+    # Inject encrypted centroids into the oracle cores.
+    alice_oracle_app.state.core.store_encrypted_centroids(
+        "workspace_alice", alice_result.encrypted_centroids,
+    )
+    bob_oracle_app.state.core.store_encrypted_centroids(
+        "workspace_bob", bob_result.encrypted_centroids,
     )
 
     # 6. Light cone: each principal owns their workspace.

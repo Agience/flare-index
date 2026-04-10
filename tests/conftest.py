@@ -245,7 +245,7 @@ def _build_stack() -> FlareStack:
             oracle_did=bob_replicas.oracle_identities[i].did)
         for i in range(THRESHOLD_M)
     ]
-    bootstrap_context(
+    alice_result = bootstrap_context(
         storage=storage,
         context_id="workspace_alice",
         owner_identity=alice,
@@ -254,7 +254,7 @@ def _build_stack() -> FlareStack:
         master_key=alice_replicas.master_key,
         nlist=4,
     )
-    bootstrap_context(
+    bob_result = bootstrap_context(
         storage=storage,
         context_id="workspace_bob",
         owner_identity=bob,
@@ -263,6 +263,17 @@ def _build_stack() -> FlareStack:
         master_key=bob_replicas.master_key,
         nlist=4,
     )
+
+    # Inject encrypted centroids into every oracle replica so the
+    # /request-centroids endpoint can serve them to authorized queriers.
+    for app in alice_replicas.apps:
+        app.state.core.store_encrypted_centroids(
+            "workspace_alice", alice_result.encrypted_centroids,
+        )
+    for app in bob_replicas.apps:
+        app.state.core.store_encrypted_centroids(
+            "workspace_bob", bob_result.encrypted_centroids,
+        )
 
     graph = LightConeGraph()
     graph.add_context("workspace_alice")

@@ -103,17 +103,26 @@ def main() -> None:
     dim = 32
     av, aids = _vecs(200, dim, 1)
     bv, bids = _vecs(200, dim, 2)
-    bootstrap_context(
+    alice_result = bootstrap_context(
         storage=storage, context_id="workspace_alice",
         owner_identity=alice_owner, oracle_endpoint=alice_url,
         oracle_did=alice_oracle_did,
         vectors=av, ids=aids, master_key=alice_master, nlist=8,
     )
-    bootstrap_context(
+    bob_result = bootstrap_context(
         storage=storage, context_id="workspace_bob",
         owner_identity=bob_owner, oracle_endpoint=bob_url,
         oracle_did=bob_oracle_did,
         vectors=bv, ids=bids, master_key=bob_master, nlist=8,
+    )
+    # Upload encrypted centroids to oracle services so they can
+    # deliver them to authorized queriers via /request-centroids.
+    from .oracle.client import HttpOracleClient as _HOC
+    _HOC(alice_url).upload_encrypted_centroids(
+        alice_owner, "workspace_alice", alice_result.encrypted_centroids,
+    )
+    _HOC(bob_url).upload_encrypted_centroids(
+        bob_owner, "workspace_bob", bob_result.encrypted_centroids,
     )
     print("contexts on storage:", [c.context_id for c in storage.list_contexts()])
 

@@ -10,7 +10,7 @@ The reference implementation is the `flare` Python package + a docker-compose st
 
 ```bash
 make build           # build the image once (~2 min, includes the embedding model)
-make test            # 97-test pytest suite (~13 s)
+make test            # 101-test pytest suite (~13 s)
 make showcase        # runnable demo on real text — see "What the showcase does" below
 make demo-compose    # full multi-container threshold stack: cross-process Alice/Bob/Carol
 make bench           # synthetic latency/throughput sweep (3 configurations)
@@ -46,7 +46,7 @@ The showcase runs against the real FLARE stack — Shamir K=2-of-M=3 threshold o
 ## What the system implements
 
 - **Per-cell HKDF + AES-256-GCM** encryption with `(context_id || cluster_id)` AAD binding
-- **Per-context FAISS k-means** partitioning; centroids currently public in the storage service (near-term mitigation: store encrypted on the ledger, deliver inside the oracle key-issuance response — see §7 of the paper), cells encrypted at rest
+- **Per-context FAISS k-means** partitioning; centroids encrypted under HKDF-derived centroid keys and delivered to authorized queriers via ECIES through the oracle — same authorization boundary as cell keys; cells encrypted at rest
 - **Multi-process services**: `flare/ledger/`, `flare/storage/`, `flare/oracle/`, each a FastAPI app
 - **Multi-method DID identities** (`flare/identity.py`): `did:key` (local) + `did:web` (HTTPS fetch + cache) via a unified `DIDResolver`
 - **Authenticated, confidential, end-to-end-bound batch wire protocol** (`flare/wire.py`):
@@ -68,14 +68,14 @@ The showcase runs against the real FLARE stack — Shamir K=2-of-M=3 threshold o
 - **Parallel cell prefetch**: query node overlaps storage cell GETs with oracle batch round-trips
 - **Concurrent revoke/issue race tests** under contention
 - **Query-node cache** with security-safe invariants: per-requester key isolation, TTL eviction, explicit invalidation, concurrent-read safety
-- **97-test pytest suite** + benchmarks committed at `paper/evals/`
+- **101-test pytest suite** + benchmarks committed at `paper/evals/`
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
 | `flare/` | Python package: crypto, identity, wire, lightcone, ledger, storage, oracle, query, sealed key storage, bootstrap, showcase |
-| `tests/` | 97-test pytest suite covering crypto, identity, wire (single + batch), light cone, oracle service + threshold + peer protocol, signed ledger + chain replay, storage signing + replay protection, multi-endpoint failover, sealed key storage, padding, cell-key TTL, query-node caching, end-to-end, concurrent revocation |
+| `tests/` | 101-test pytest suite covering crypto, identity, wire (single + batch), light cone, oracle service + threshold + peer protocol, signed ledger + chain replay, storage signing + replay protection, multi-endpoint failover, sealed key storage, padding, cell-key TTL, query-node caching, centroid gate, end-to-end, concurrent revocation |
 | `bench/` | `bench_encrypted_vs_plain.py` (synthetic latency sweep, 3 configs) and `bench_real_data.py` (BEIR SciFact recall vs plaintext FAISS baseline) |
 | `compose/` | `generate_secrets.py` (one-shot key + sealed-file generator) and `entrypoint.sh` (docker-compose service launcher) |
 | `paper/` | [The research paper](paper/flare.md), mermaid figures, BibTeX, evaluation outputs |
@@ -93,7 +93,7 @@ The showcase runs against the real FLARE stack — Shamir K=2-of-M=3 threshold o
 | Per-process nonce caches | Operational concern; production shares state via a coordination service |
 | TTL relies on coordinated wall-clock time | Operational; assumes NTP |
 | Failover order is deterministic (registration order) | F-1 in `security.md` |
-| Centroid topology leakage | Near-term mitigation designed: store centroids encrypted on the ledger, deliver inside oracle key-issuance response (no extra round-trip). Not yet implemented. |
+| Centroid topology leakage — residual | Centroids encrypted at rest, oracle-gated via ECIES. Residual: authorized querier sees centroid geometry (same info it already gets via cell keys + results). Noise/LPH are optional second-layer mitigations. |
 | Token incentives + slashing | Out of scope for the cryptographic prototype |
 | Forward illumination via a learned predictive model | The deterministic padding covers the same security shape |
 | ~18× warm-path overhead vs plaintext (129× cold) | Query-node caching (routing, ciphertext, cell-key) cuts 103 ms → 8.4 ms; residual is FastAPI/JSON process-boundary cost. Real-datacenter deployment expected 2–4 ms/query |
@@ -102,6 +102,14 @@ The showcase runs against the real FLARE stack — Shamir K=2-of-M=3 threshold o
 
 Apache 2.0. See [LICENSE](LICENSE).
 
-## Authors
+## Patents
 
-John Sessford. Built with Claude (Anthropic).
+This repository contains inventions for which patent applications are
+being prepared. See [PATENTS.md](PATENTS.md) for details. Use of the
+source code under the Apache 2.0 license includes the patent license
+granted by Section 3 of that license. Independent reimplementations of
+the described methods are not covered by the Apache 2.0 patent grant.
+
+## AI Disclosure
+
+Concept, architecture, and technical direction by John Sessford (Ikailo). Implementation by Claude (Anthropic) under the author's guidance.
