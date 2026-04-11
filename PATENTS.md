@@ -290,6 +290,13 @@ in a ledger before deriving and issuing each cell key, so that
 revocation of a grant immediately prevents new cell keys from being
 issued without re-encrypting the stored data.
 
+**Claim 5.** The method of Claim 1, wherein the key derivation in
+step (b) is replaced by a two-layer envelope: a context wrapping key
+(CWK) is derived from the master key via HKDF, and a random cell
+encryption key (CEK) is wrapped under the CWK, enabling cross-context
+sharing of cells by re-wrapping the CEK under a different CWK without
+re-encrypting the cell data (see Invention 5).
+
 ---
 
 ## Invention 3 — Threshold Oracle Key Issuance with Per-Peer Verification ("Threshold Oracle Network")
@@ -547,6 +554,316 @@ reconstruction of a master key.
 
 ---
 
+## Invention 5 — Envelope Encryption with Cross-Context Key Re-Wrapping
+
+### Field
+
+Cryptographic key management; privacy-preserving data sharing across
+authorization domains.
+
+### Background
+
+Existing per-partition encryption systems (including the single-layer
+scheme described in Invention 2) derive cell encryption keys
+deterministically from a master key:
+
+    cell_key = HKDF(master_key, context_id || cluster_id)
+
+This creates a rigid coupling between the encryption key and the
+authorization domain: a cell encrypted under context A's key cannot
+be read through context B's key without re-encrypting the cell data.
+Cross-domain data sharing therefore requires either (a) duplicating
+and re-encrypting the cell under the target domain's key, or (b)
+granting the recipient access to the source domain, which may expose
+more data than intended.
+
+Envelope encryption (e.g., AWS KMS data key wrapping) wraps a random
+data key under a key-encrypting key, but existing envelope schemes
+do not combine:
+- Deterministic context wrapping keys derived from a shared master key
+  (enabling on-demand derivation without stored key material),
+- Random per-cell encryption keys wrapped under the context key
+  (enabling cross-context sharing by re-wrapping without re-encryption),
+- AAD-bound wrapping that ties the wrapped key to its (context, cell)
+  identity (preventing key-substitution attacks), and
+- Integration with a threshold oracle that derives the context wrapping
+  key from a Shamir-reconstructed master key per request.
+
+### Summary of the Invention
+
+A method and system for two-layer envelope encryption enabling
+cross-context data sharing in an encrypted partitioned retrieval
+system, comprising:
+
+1. **Context Wrapping Key (CWK).** For each authorization context,
+   a symmetric wrapping key is derived deterministically from the
+   owner's master key:
+
+       CWK = HKDF-SHA256(master_key, info = "flare/v5/cwk" || 0x00 || context_id)
+
+   The CWK is never stored — the oracle derives it on demand from
+   the master key. The HKDF info prefix ensures CWKs are
+   domain-separated from cell keys derived under the Invention 2
+   scheme.
+
+2. **Cell Encryption Key (CEK).** For each partition cell, a random
+   32-byte symmetric key is generated. The cell data is encrypted
+   under the CEK using AES-256-GCM with AAD binding to the cell
+   identity (context and cluster), identical to Invention 2. The
+   CEK is then wrapped (encrypted) under the CWK using AES-256-GCM
+   with the same AAD, producing a wrapped CEK blob stored alongside
+   the encrypted cell.
+
+3. **Oracle-side unwrapping.** When a querier requests a cell key,
+   the oracle:
+   (a) derives the CWK from the master key via HKDF,
+   (b) loads the wrapped CEK blob for the requested cell,
+   (c) unwraps the CEK by AES-256-GCM decryption using the CWK,
+   (d) returns the CEK to the querier via the ECIES channel
+       (Invention 3).
+   The CWK is ephemeral — derived, used, and discarded per batch.
+
+4. **Cross-context sharing by CEK re-wrapping.** To share a cell
+   from context A into context B without re-encrypting the cell data:
+   (a) derive CWK_A from master_key_A,
+   (b) unwrap the CEK from CWK_A,
+   (c) derive CWK_B from master_key_B,
+   (d) wrap the same CEK under CWK_B with AAD binding to context B,
+   (e) store the new wrapped CEK blob and a containment edge
+       recording the cell's membership in context B.
+   The encrypted cell data is unchanged — only the key wrapping
+   changes. The cell can now be decrypted by anyone with access to
+   context B's CWK.
+
+5. **Containment edges for multi-context membership.** Explicit
+   directed edges in the authorization graph record which cells
+   belong to which contexts. A cell shared into a second context
+   gains a containment edge from that context without losing its
+   edge from the source context. The query engine uses containment
+   edges (when present) to enumerate cells per context, replacing
+   the naive range(nlist) enumeration that assumes each cell belongs
+   to exactly one context.
+
+6. **Backward-compatible hybrid path.** When a wrapped CEK exists
+   for a cell, the oracle uses the two-layer envelope path. When no
+   wrapped CEK exists (legacy data), the oracle falls back to
+   single-layer HKDF derivation (Invention 2). Both paths coexist
+   in the same oracle and the same batch response.
+
+### Claims
+
+**Claim 1.** A computer-implemented method for cross-context data
+sharing in an encrypted partitioned retrieval system, comprising:
+
+(a) for each authorization context, deriving a context wrapping key
+    (CWK) from a master key using a key derivation function;
+
+(b) for each partition cell, generating a random cell encryption key
+    (CEK), encrypting the cell data under the CEK with authenticated
+    encryption and associated data binding the ciphertext to the
+    cell's identity, and wrapping the CEK under the CWK with
+    authenticated encryption and associated data;
+
+(c) to share a cell from a source context into a target context:
+    unwrapping the CEK using the source context's CWK, wrapping the
+    same CEK under the target context's CWK with associated data
+    binding to the target context, and storing the new wrapped CEK,
+    wherein the encrypted cell data is not re-encrypted;
+
+(d) recording the shared cell's membership in both contexts via
+    explicit containment edges in an authorization graph.
+
+**Claim 2.** The method of Claim 1, wherein the CWK is derived
+deterministically by a threshold oracle that reconstructs the master
+key from Shamir shares per request, derives the CWK via HKDF, unwraps
+the CEK, and returns the CEK to the querier, discarding the CWK and
+master key after the batch completes.
+
+**Claim 3.** The method of Claim 1, wherein the system supports a
+hybrid mode in which cells with wrapped CEKs use the two-layer
+envelope path and cells without wrapped CEKs fall back to single-layer
+key derivation, enabling incremental migration without re-encrypting
+existing data.
+
+**Claim 4.** The method of Claim 1, wherein the containment edges are
+stored in the same graph structure used for authorization traversal
+(Invention 1), so that the query engine resolves which cells belong
+to a context by reading containment edges rather than by enumerating
+a fixed partition range.
+
+---
+
+## Invention 6 — Grant-Universal Access with Revocable Self-Grant ("Grant-First Access")
+
+### Field
+
+Computer security; access control for encrypted data systems.
+
+### Background
+
+In systems where an oracle issues encryption keys on behalf of a data
+owner (as in Inventions 2–4), the owner typically has an implicit
+bypass: the oracle recognizes the requester's identity as the owner
+and issues keys without checking the grant ledger. This creates a
+parallel authority model:
+
+- Non-owners: access mediated by grants in the ledger.
+- Owners: access mediated by identity comparison (`requester == owner`).
+
+The parallel model does not compose with delegation, sharing, or
+multi-tenant access. It also means the owner's access cannot be
+suspended or audited through the same mechanism used for all other
+principals.
+
+### Summary of the Invention
+
+A method for grant-universal access control in an encrypted data
+system, comprising:
+
+1. **Self-grant at bootstrap.** When a data owner creates a new
+   authorization context and registers it with the system, the
+   bootstrap process also creates and signs a grant from the owner
+   to themselves in the grant ledger. This self-grant is a regular
+   signed grant record, indistinguishable from grants to other
+   principals.
+
+2. **No owner bypass.** The key-issuance oracle has no special-case
+   check for `requester == owner`. Every key request — including the
+   owner's — is authorized by looking up a valid grant in the ledger.
+   The oracle may label the decision as "owner" in its trace output
+   (for diagnostics), but the authorization path is identical.
+
+3. **Revocable owner access.** Because the owner's access flows
+   through a regular grant, it can be revoked using the standard
+   revocation mechanism. Revoking the self-grant immediately blocks
+   the owner from accessing their own data through the oracle. This
+   enables scenarios such as legal holds, multi-signatory custody,
+   and administrative suspension.
+
+4. **Re-grantable.** After revocation, the owner (or a delegate with
+   grant-signing authority) can create a new self-grant, restoring
+   access through the same ledger mechanism.
+
+### Claims
+
+**Claim 1.** A computer-implemented method for uniform access control
+in an encrypted data system with an on-demand key issuance authority,
+comprising:
+
+(a) at context creation time, creating a signed grant record in a
+    grant ledger from the data owner to themselves, said grant being
+    stored and validated identically to grants for other principals;
+
+(b) when the data owner requests encryption keys from the key
+    issuance authority, verifying authorization exclusively by looking
+    up a valid grant in the grant ledger, without any special-case
+    identity comparison for the owner;
+
+(c) whereby revoking the owner's self-grant in the ledger immediately
+    prevents the key issuance authority from issuing keys to the
+    owner, using the same revocation mechanism applied to all other
+    principals.
+
+**Claim 2.** The method of Claim 1, further comprising restoring the
+owner's access by creating a new self-grant in the ledger after
+revocation, using the standard grant creation mechanism.
+
+---
+
+## Invention 7 — Per-User Ephemeral Super-Contexts via Light-Cone-Scoped KNN Clustering
+
+### Field
+
+Information retrieval; privacy-preserving navigation for encrypted
+multi-tenant data systems.
+
+### Background
+
+In encrypted retrieval systems with many authorization contexts (each
+belonging to different data owners), a principal with access to a
+large number of contexts faces a navigation problem: they can search
+within individual contexts but have no way to discover thematic
+structure across the contexts they can access. Traditional approaches
+include:
+
+- Manual taxonomies (user-created folders or tags), which require
+  effort and do not scale.
+- Global clustering (system-wide topic models), which leaks
+  information about contexts the user cannot access and is identical
+  for all users.
+- Faceted search (metadata-driven), which requires structured
+  metadata that encrypted systems typically lack.
+
+No existing approach provides automatic, per-user, privacy-respecting
+thematic groupings that reflect only the data visible to each
+specific user.
+
+### Summary of the Invention
+
+A method for generating ephemeral, per-user navigational groupings
+("super-contexts") over an encrypted partitioned retrieval system,
+comprising:
+
+1. **Light-cone scoping.** The authorized context set is computed
+   for the querying principal using the graph-reachability mechanism
+   of Invention 1. Only centroid data from authorized contexts is
+   used; unauthorized contexts contribute nothing.
+
+2. **Oracle-gated centroid collection.** For each authorized context,
+   the principal requests centroid vectors from the oracle via the
+   authenticated wire protocol (Invention 3). The oracle verifies
+   the grant before releasing centroids, so the principal never sees
+   centroids for unauthorized contexts.
+
+3. **Concatenated KNN clustering.** All authorized centroid vectors
+   are concatenated into a single matrix and clustered using k-means
+   with a user-specified number of super-clusters. Each original
+   centroid is assigned to its nearest super-cluster.
+
+4. **Per-user projection.** The resulting super-contexts are
+   ephemeral — they are not stored in the ledger, storage, or any
+   persistent state. They are recomputed per-user, per-session.
+   Different users with different light cones (different authorized
+   context sets) see different super-context groupings, even over
+   the same underlying data.
+
+5. **Query filtering.** Optionally, a super-context identifier can
+   be passed to the search engine to restrict centroid routing to
+   the cells assigned to that super-context's member set. This
+   narrows the search space without changing the security properties.
+
+### Claims
+
+**Claim 1.** A computer-implemented method for generating
+privacy-respecting navigational groupings in an encrypted multi-tenant
+retrieval system, comprising:
+
+(a) computing a set of authorized contexts for a querying principal
+    using graph-reachability authorization;
+
+(b) collecting centroid vectors for each authorized context from a
+    key issuance authority that verifies the principal's grant before
+    releasing centroids;
+
+(c) concatenating the collected centroids into a single matrix and
+    applying KNN clustering to produce a set of super-clusters;
+
+(d) assigning each original centroid to its nearest super-cluster
+    and grouping the corresponding partition cells by super-cluster
+    membership;
+
+(e) returning the super-clusters as ephemeral, per-user navigational
+    groupings that are not persisted and that reflect only the data
+    visible to the querying principal.
+
+**Claim 2.** The method of Claim 1, further comprising filtering a
+search query to restrict centroid routing to the partition cells
+assigned to a specified super-cluster, narrowing the search space
+while preserving the encryption and authorization properties of the
+underlying system.
+
+---
+
 ## Prior Art Differentiation
 
 The following table summarizes how the inventions described above
@@ -561,17 +878,20 @@ differ from known prior art:
 | Private Information Retrieval (PIR) | Server-oblivious retrieval | O(n) server cost; no ANN support |
 | FAISS / Qdrant / Milvus / Weaviate | High-performance ANN search | Plaintext indexes; no per-partition encryption |
 | AWS KMS / HashiCorp Vault | Centralized key management | Single point of trust; no threshold distribution; no per-cell derivation |
+| AWS KMS envelope encryption | Data key wrapping under a master key | No cross-context re-wrapping; no integration with graph authorization or threshold oracle |
 | Ocean Protocol | Data access economics + blockchain | No encrypted vector search; no IVF partitioning |
 | Shamir Secret Sharing (generic) | Threshold secret reconstruction | No per-request grant verification; no ECIES delivery; no cell-key derivation |
+| Google Zanzibar / SpiceDB | Graph-based authorization | No encryption enforcement; no per-partition keys; no path-predicate deny |
+| Topic modeling (LDA, BERTopic) | Global document clustering | Global (not per-user); leaks unauthorized data topology; requires plaintext |
 
 ## Conception History
 
 The inventions described herein were conceived by the named inventor
-over the period March 15, 2026 through April 8, 2026. Contemporaneous
+over the period March 15, 2026 through April 11, 2026. Contemporaneous
 records of conception include:
 
 - AI-assisted development session transcripts (VS Code Copilot and
-  Claude Code) from March 15–April 8, 2026, documenting the
+  Claude Code) from March 15–April 11, 2026, documenting the
   inventor's directions, architectural decisions, and design
   instructions at each stage.
 - The design document "Light-Cone Graph Authorization with Semantic
@@ -579,6 +899,10 @@ records of conception include:
   implementation.
 - The design document "Partitioned Encrypted Vector Search — Research
   Sketch" (dated April 7, 2026).
+- The design document "FLARE: Federated Light-cone Access with
+  Recursive Encryption" (dated April 10, 2026), which describes the
+  envelope encryption, grant-first access, containment edge, and
+  super-context concepts prior to implementation.
 - The LinkedIn post dated April 8, 2026 disclosing the FLARE system
   at a high level.
 - Git commit history for the FLARE repository showing implementation

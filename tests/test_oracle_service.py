@@ -67,7 +67,12 @@ def test_replay_rejected_at_service():
 
 
 def test_owner_can_always_issue_to_self():
-    owner, _, c = _make_oracle()
+    owner, ledger, c = _make_oracle()
+    # Grant-first: the owner's access flows through a self-grant.
+    ledger.add_grant(
+        grantor_identity=owner, grantee=owner.did,
+        context_id="ctx", issued_at=datetime(2000, 1, 1),
+    )
     materials = build_batch_request(owner, [("ctx", 0)])
     r = c.post("/issue-batch", json=materials.request.model_dump())
     assert r.status_code == 200

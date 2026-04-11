@@ -59,6 +59,7 @@ def _build_inproc_stack(owner: Identity):
     master = fresh_master_key()
     oracle_id = Identity.generate()
     ledger_app = build_ledger_app()
+    ledger = HttpLedgerClient(client=TestClient(ledger_app))
     storage_app = build_storage_app()
     storage = HttpStorageClient(client=TestClient(storage_app))
     oracle_app = build_oracle_app(
@@ -67,7 +68,7 @@ def _build_inproc_stack(owner: Identity):
         master_key=master,
         oracle_identity=oracle_id,
     )
-    return master, oracle_id, storage, TestClient(oracle_app)
+    return master, oracle_id, storage, TestClient(oracle_app), ledger
 
 
 def main() -> None:
@@ -165,7 +166,7 @@ def main() -> None:
     print(f"\n[6/6] FLARE encrypted pipeline (per-cell HKDF + AES-GCM, "
           f"Ed25519+ECIES wire, TTL-bounded keys, nlist={NLIST}, nprobe={NPROBE})...")
     owner = Identity.generate()
-    master, oracle_id, storage, oracle_test_client = _build_inproc_stack(owner)
+    master, oracle_id, storage, oracle_test_client, ledger = _build_inproc_stack(owner)
     result_bs = bootstrap_context(
         storage=storage, context_id=CTX,
         owner_identity=owner,
@@ -175,10 +176,13 @@ def main() -> None:
         ids=np.arange(n_docs, dtype=np.int64),
         master_key=master,
         nlist=NLIST,
+        ledger_client=ledger,
     )
     oracle_test_client.app.state.core.store_encrypted_centroids(
         CTX, result_bs.encrypted_centroids,
     )
+    for cell_ref, wrapped in result_bs.wrapped_ceks.items():
+        oracle_test_client.app.state.core.store_wrapped_cek(cell_ref, wrapped)
     graph = LightConeGraph()
     graph.add_context(CTX)
     graph.add_edge(Edge(owner.did, CTX, "owns"))

@@ -38,7 +38,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
-from .types import ContextId, PrincipalId
+from .types import ClusterId, ContainmentEdge, ContextId, PrincipalId
 
 NodeId = str  # principals and contexts share a namespace
 
@@ -100,6 +100,10 @@ class LightConeGraph:
     context_nodes: set[NodeId] = field(default_factory=set)
     deny_edges_by_pair: dict[tuple[NodeId, NodeId], list[Edge]] = field(default_factory=dict)
     deny_paths: list[DenyPath] = field(default_factory=list)
+    # Containment: explicit edges from contexts to cells. When present,
+    # the query engine uses these to resolve cells instead of enumerating
+    # range(nlist). Enables cross-context sharing.
+    containment_edges: dict[ContextId, list[ContainmentEdge]] = field(default_factory=dict)
 
     def add_context(self, context_id: ContextId) -> None:
         self.context_nodes.add(context_id)
@@ -111,6 +115,20 @@ class LightConeGraph:
 
     def add_deny_path(self, deny: DenyPath) -> None:
         self.deny_paths.append(deny)
+
+    # ---- Containment edges (context → cells) ----
+
+    def add_containment_edge(self, edge: ContainmentEdge) -> None:
+        self.containment_edges.setdefault(edge.context_id, []).append(edge)
+
+    def remove_containment_edge(self, edge: ContainmentEdge) -> None:
+        edges = self.containment_edges.get(edge.context_id, [])
+        if edge in edges:
+            edges.remove(edge)
+
+    def get_cells(self, context_id: ContextId) -> list[ContainmentEdge]:
+        """Return containment edges for a context, or empty if not registered."""
+        return list(self.containment_edges.get(context_id, []))
 
     def remove_edge(self, edge: Edge) -> None:
         edges = self.out_edges.get(edge.src, [])

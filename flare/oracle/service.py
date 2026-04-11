@@ -160,17 +160,18 @@ def build_oracle_app(
         # For batch requests: every cell must be authorized.
         # For centroid requests: at least one context must be authorized.
         now = datetime.fromtimestamp(inner.timestamp_ns / 1e9, tz=timezone.utc).replace(tzinfo=None)
+        # Grant-first: all access — including the owner's — flows
+        # through the ledger. The owner holds a standing self-grant.
         if req.request_type == "centroids":
             # Centroid request: any authorized context suffices.
-            authorized = inner.requester_did == core.owner
-            if not authorized:
-                for ctx in inner.context_ids:
-                    grant = core._ledger.find_valid(  # noqa: SLF001
-                        core.owner, inner.requester_did, ctx, now,
-                    )
-                    if grant is not None:
-                        authorized = True
-                        break
+            authorized = False
+            for ctx in inner.context_ids:
+                grant = core._ledger.find_valid(  # noqa: SLF001
+                    core.owner, inner.requester_did, ctx, now,
+                )
+                if grant is not None:
+                    authorized = True
+                    break
             if not authorized:
                 raise HTTPException(
                     status_code=403,
@@ -179,8 +180,6 @@ def build_oracle_app(
         else:
             # Batch key request: every cell must be authorized.
             for c in inner.cells:
-                if inner.requester_did == core.owner:
-                    continue
                 grant = core._ledger.find_valid(  # noqa: SLF001
                     core.owner, inner.requester_did, c.context_id, now,
                 )

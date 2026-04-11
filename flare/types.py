@@ -47,6 +47,18 @@ class Grant:
         return True
 
 
+@dataclass(frozen=True)
+class ContainmentEdge:
+    """Explicit edge expressing that a cell belongs to a context.
+
+    Enables a cell to live in multiple contexts (cross-context sharing)
+    without document-level conflict.
+    """
+    context_id: ContextId
+    cluster_id: ClusterId
+    edge_type: str = "contains"
+
+
 @dataclass
 class QueryHit:
     context_id: ContextId

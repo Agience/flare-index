@@ -98,3 +98,57 @@ def decrypt_cell(cell_key: bytes, cell: EncryptedCell, associated: bytes = b"") 
 
 def fresh_master_key() -> bytes:
     return os.urandom(KEY_BYTES)
+
+
+# ---- Envelope encryption (CWK + CEK) ----
+#
+# Two-layer key hierarchy:
+#   master_key → CWK (Context Wrapping Key, per-context, HKDF-derived)
+#                 → CEK (Cell Encryption Key, per-cell, random)
+#
+# CWK is deterministic from the master key — the oracle derives it on
+# the fly, same as the old single-layer path. CEK is random per-cell,
+# wrapped by CWK (AES-256-GCM). This enables cross-context cell sharing
+# (re-wrap the CEK under a different CWK) and future per-grantee CWK
+# wrapping (revocation = removing the wrapped CWK copy).
+
+CWK_HKDF_SALT = b"flare/v5/cwk-salt"
+
+
+def derive_cwk(master_key: bytes, context_id: ContextId) -> bytes:
+    """Derive a per-context wrapping key from the owner's master key.
+
+    Deterministic: the oracle derives CWKs on the fly without storage.
+    """
+    if len(master_key) < 32:
+        raise ValueError("master_key must be at least 32 bytes of entropy")
+    _validate_context_id(context_id)
+    info = b"flare/v5/cwk\x00" + context_id.encode("utf-8")
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=KEY_BYTES,
+        salt=CWK_HKDF_SALT,
+        info=info,
+    ).derive(master_key)
+
+
+def generate_cek() -> bytes:
+    """Generate a random Cell Encryption Key."""
+    return os.urandom(KEY_BYTES)
+
+
+def wrap_cek(cwk: bytes, cek: bytes, aad: bytes = b"") -> bytes:
+    """Wrap a CEK under a CWK using AES-256-GCM.
+
+    Returns nonce || ciphertext (same format as EncryptedCell).
+    """
+    nonce = os.urandom(NONCE_BYTES)
+    ct = AESGCM(cwk).encrypt(nonce, cek, aad)
+    return nonce + ct
+
+
+def unwrap_cek(cwk: bytes, wrapped: bytes, aad: bytes = b"") -> bytes:
+    """Unwrap a CEK from a CWK-wrapped blob."""
+    nonce = wrapped[:NONCE_BYTES]
+    ct = wrapped[NONCE_BYTES:]
+    return AESGCM(cwk).decrypt(nonce, ct, aad)

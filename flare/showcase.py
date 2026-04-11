@@ -233,6 +233,7 @@ def main() -> None:
                           for u, oid in zip(a_urls, a_oids)],
         vectors=cooking_vecs, ids=cooking_ids,
         master_key=a_master, nlist=4,
+        ledger_client=ledger,
     )
     astronomy_result = bootstrap_context(
         storage=storage, context_id="astronomy",
@@ -241,16 +242,21 @@ def main() -> None:
                           for u, oid in zip(b_urls, b_oids)],
         vectors=astronomy_vecs, ids=astronomy_ids,
         master_key=b_master, nlist=4,
+        ledger_client=ledger,
     )
-    # Inject encrypted centroids into every oracle replica.
+    # Inject encrypted centroids and wrapped CEKs into every oracle replica.
     for app in a_apps:
         app.state.core.store_encrypted_centroids(
             "cooking", cooking_result.encrypted_centroids,
         )
+        for cell_ref, wrapped in cooking_result.wrapped_ceks.items():
+            app.state.core.store_wrapped_cek(cell_ref, wrapped)
     for app in b_apps:
         app.state.core.store_encrypted_centroids(
             "astronomy", astronomy_result.encrypted_centroids,
         )
+        for cell_ref, wrapped in astronomy_result.wrapped_ceks.items():
+            app.state.core.store_wrapped_cek(cell_ref, wrapped)
     print(f"      cooking:   {len(COOKING)} docs encrypted into per-cluster cells under Alice's master key")
     print(f"      astronomy: {len(ASTRONOMY)} docs encrypted into per-cluster cells under Bob's master key")
 

@@ -78,6 +78,7 @@ def _build_single_stack():
     master = fresh_master_key()
 
     ledger_app = build_ledger_app()
+    ledger = HttpLedgerClient(client=TestClient(ledger_app))
     storage_app = build_storage_app()
     storage = HttpStorageClient(client=TestClient(storage_app))
 
@@ -88,7 +89,7 @@ def _build_single_stack():
         oracle_identity=oracle_id,
     )
     oracle_test_client = TestClient(oracle_app)
-    return owner, oracle_id, master, storage, oracle_test_client
+    return owner, oracle_id, master, storage, oracle_test_client, ledger
 
 
 def _build_threshold_stack():
@@ -127,7 +128,8 @@ def _build_threshold_stack():
             coord_identity=oracle_ids[i], peers=peers, needed=THRESHOLD_K - 1,
         )
 
-    return owner, oracle_ids, master, storage, clients[0], oracle_ids[0]
+    ledger = HttpLedgerClient(client=TestClient(ledger_app))
+    return owner, oracle_ids, master, storage, clients[0], oracle_ids[0], ledger
 
 
 def _run(label: str, build_fn, *, padding_width: int = 0) -> dict:
@@ -140,9 +142,9 @@ def _run(label: str, build_fn, *, padding_width: int = 0) -> dict:
     t_plain = time.perf_counter() - t0
 
     if "single" in label:
-        owner, oracle_id, master, storage, oracle_test_client = build_fn()
+        owner, oracle_id, master, storage, oracle_test_client, ledger = build_fn()
     else:
-        owner, _all_ids, master, storage, oracle_test_client, oracle_id = build_fn()
+        owner, _all_ids, master, storage, oracle_test_client, oracle_id, ledger = build_fn()
 
     result = bootstrap_context(
         storage=storage,
@@ -153,11 +155,14 @@ def _run(label: str, build_fn, *, padding_width: int = 0) -> dict:
         vectors=v, ids=ids,
         master_key=master,
         nlist=NLIST,
+        ledger_client=ledger,
     )
-    # Inject encrypted centroids into the oracle core(s).
+    # Inject encrypted centroids and wrapped CEKs into the oracle core(s).
     oracle_test_client.app.state.core.store_encrypted_centroids(
         CTX, result.encrypted_centroids,
     )
+    for cell_ref, wrapped in result.wrapped_ceks.items():
+        oracle_test_client.app.state.core.store_wrapped_cek(cell_ref, wrapped)
 
     graph = LightConeGraph()
     graph.add_context(CTX)

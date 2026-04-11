@@ -116,6 +116,7 @@ def main() -> None:
         oracle_did=alice_oracle_id.did,
         vectors=av, ids=aids,
         master_key=alice_master, nlist=8,
+        ledger_client=ledger_client,
     )
     bob_result = bootstrap_context(
         storage=storage_client,
@@ -125,14 +126,19 @@ def main() -> None:
         oracle_did=bob_oracle_id.did,
         vectors=bv, ids=bids,
         master_key=bob_master, nlist=8,
+        ledger_client=ledger_client,
     )
-    # Inject encrypted centroids into the oracle cores.
+    # Inject encrypted centroids and wrapped CEKs into the oracle cores.
     alice_oracle_app.state.core.store_encrypted_centroids(
         "workspace_alice", alice_result.encrypted_centroids,
     )
+    for cell_ref, wrapped in alice_result.wrapped_ceks.items():
+        alice_oracle_app.state.core.store_wrapped_cek(cell_ref, wrapped)
     bob_oracle_app.state.core.store_encrypted_centroids(
         "workspace_bob", bob_result.encrypted_centroids,
     )
+    for cell_ref, wrapped in bob_result.wrapped_ceks.items():
+        bob_oracle_app.state.core.store_wrapped_cek(cell_ref, wrapped)
 
     # 6. Light cone: each principal owns their workspace.
     graph = LightConeGraph()

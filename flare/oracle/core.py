@@ -25,10 +25,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Callable, Optional
 
-from ..crypto import derive_cell_key, derive_centroid_key
+from ..crypto import derive_cell_key, derive_centroid_key, derive_cwk, unwrap_cek
 from ..ledger.client import GrantLedgerClient
 from ..sealed import SecureBytes
-from ..types import ClusterId, ContextId, PrincipalId
+from ..types import CellRef, ClusterId, ContextId, PrincipalId
 from .threshold import Share, reconstruct_secret
 
 
@@ -93,6 +93,9 @@ class OracleCore:
         # Stored at bootstrap time; decrypted on demand for authorized
         # queriers inside issue_centroids().
         self._encrypted_centroids: dict[ContextId, bytes] = {}
+        # Envelope encryption: wrapped CEKs per cell. When present,
+        # decide_batch uses CWK + unwrap_cek instead of derive_cell_key.
+        self._wrapped_ceks: dict[CellRef, bytes] = {}
 
     @property
     def is_threshold(self) -> bool:
@@ -109,6 +112,16 @@ class OracleCore:
         ``encrypt_cell(derive_centroid_key(master_key, ctx), npy_bytes)``.
         """
         self._encrypted_centroids[context_id] = encrypted_blob
+
+    def store_wrapped_cek(
+        self, cell_ref: CellRef, wrapped_cek: bytes,
+    ) -> None:
+        """Store a CWK-wrapped CEK for a cell.
+
+        Called at bootstrap time. When present, ``decide_batch`` uses
+        CWK + unwrap instead of the deprecated single-layer HKDF.
+        """
+        self._wrapped_ceks[cell_ref] = wrapped_cek
 
     def issue_centroids(
         self,
@@ -128,17 +141,19 @@ class OracleCore:
         from ..crypto import decrypt_cell as _decrypt_cell
         from ..crypto import EncryptedCell as _EncryptedCell
 
-        # Stage A: per-context authorization.
+        # Stage A: per-context authorization. All access — including the
+        # owner's — flows through the ledger. The owner holds a standing
+        # self-grant created at bootstrap; there is no fast-path bypass.
         decisions: list[OracleDecision] = []
         for ctx in context_ids:
-            if requester == self.owner:
-                decisions.append(OracleDecision.OWNER)
-            else:
-                grant = self._ledger.find_valid(self.owner, requester, ctx, now)
+            grant = self._ledger.find_valid(self.owner, requester, ctx, now)
+            if grant is not None:
                 decisions.append(
-                    OracleDecision.GRANTED if grant is not None
-                    else OracleDecision.DENIED_NO_GRANT
+                    OracleDecision.OWNER if grant.grantor == grant.grantee
+                    else OracleDecision.GRANTED
                 )
+            else:
+                decisions.append(OracleDecision.DENIED_NO_GRANT)
 
         if not any(d in (OracleDecision.OWNER, OracleDecision.GRANTED) for d in decisions):
             return [None] * len(context_ids)
@@ -214,23 +229,26 @@ class OracleCore:
         *,
         original_request: Optional[object] = None,
     ) -> list[OracleResult]:
-        # Stage A: per-cell ledger authorization. Multiple cells in
-        # the same context map to the same `find_valid` lookup, so
-        # we dedupe by (grantor, requester, context) — the lookup is
-        # cell-independent. For a batch of nprobe cells that all hit
-        # the same context this turns N ledger calls into 1.
+        # Stage A: per-cell ledger authorization. All access — including
+        # the owner's — flows through the ledger. The owner holds a
+        # standing self-grant created at bootstrap; there is no
+        # fast-path bypass. Multiple cells in the same context map to
+        # the same `find_valid` lookup (cell-independent), so we dedupe.
         decisions: list[OracleDecision] = []
         ledger_cache: dict[ContextId, OracleDecision] = {}
         for ctx, _cluster in cells:
-            if requester == self.owner:
-                decisions.append(OracleDecision.OWNER)
-                continue
             cached = ledger_cache.get(ctx)
             if cached is not None:
                 decisions.append(cached)
                 continue
             grant = self._ledger.find_valid(self.owner, requester, ctx, now)
-            decision = OracleDecision.GRANTED if grant is not None else OracleDecision.DENIED_NO_GRANT
+            if grant is not None:
+                decision = (
+                    OracleDecision.OWNER if grant.grantor == grant.grantee
+                    else OracleDecision.GRANTED
+                )
+            else:
+                decision = OracleDecision.DENIED_NO_GRANT
             ledger_cache[ctx] = decision
             decisions.append(decision)
 
@@ -275,7 +293,18 @@ class OracleCore:
                 if decision in (OracleDecision.OWNER, OracleDecision.GRANTED) and not threshold_failed:
                     assert master_key_view is not None
                     self.issued_count += 1
-                    key = derive_cell_key(master_key_view, ctx, cluster)
+                    # Envelope encryption: if a wrapped CEK exists for
+                    # this cell, derive CWK and unwrap. Otherwise fall
+                    # back to the deprecated single-layer HKDF path.
+                    ref = CellRef(ctx, cluster)
+                    wrapped = self._wrapped_ceks.get(ref)
+                    if wrapped is not None:
+                        cwk = derive_cwk(master_key_view, ctx)
+                        aad = f"{ctx}:{cluster}".encode("utf-8")
+                        key = unwrap_cek(cwk, wrapped, aad)
+                        del cwk
+                    else:
+                        key = derive_cell_key(master_key_view, ctx, cluster)
                     results.append(OracleResult(decision, key))
                 elif threshold_failed and decision in (
                     OracleDecision.OWNER, OracleDecision.GRANTED

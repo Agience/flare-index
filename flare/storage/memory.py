@@ -104,6 +104,8 @@ class InMemoryStorage:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._contexts: dict[ContextId, StoredContext] = {}
+        # Envelope encryption: wrapped CEKs per (context_id, cluster_id).
+        self._wrapped_ceks: dict[tuple[ContextId, int], bytes] = {}
 
     def register_context(
         self,
@@ -138,3 +140,13 @@ class InMemoryStorage:
     def get_registration(self, context_id: ContextId) -> ContextRegistration:
         with self._lock:
             return self._contexts[context_id].registration
+
+    # ---- Envelope encryption: wrapped CEK storage ----
+
+    def put_wrapped_cek(self, context_id: ContextId, cluster_id: int, blob: bytes) -> None:
+        with self._lock:
+            self._wrapped_ceks[(context_id, cluster_id)] = blob
+
+    def get_wrapped_cek(self, context_id: ContextId, cluster_id: int) -> bytes:
+        with self._lock:
+            return self._wrapped_ceks[(context_id, cluster_id)]

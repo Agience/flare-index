@@ -61,3 +61,21 @@ Centroid topology leakage (A-3) is now fully mitigated in the implementation, no
 - O-5 updated to note primary mitigation is implemented.
 
 Each is documented in §7 Limitations and `docs/analysis/security.md` with reasoning.
+
+## v1.2 — 2026-04-11 — Envelope encryption, grant-first access, containment edges, super-contexts
+
+Four architectural concepts integrated into the working model:
+
+**Grant-first access (C-32).** The oracle's `requester == self.owner` fast-path is removed. Owner access flows through a standing self-grant created at bootstrap. Revoking the self-grant blocks the owner — the ledger is the sole authority. All call sites updated (bootstrap, demo, showcase, demo-compose, benchmarks). New `tests/test_grant_first.py` (3 tests).
+
+**Envelope encryption (C-33).** Single-layer HKDF derivation replaced with two-layer envelope: `master_key → CWK (HKDF, per-context) → CEK (random, per-cell)`. CWK wraps CEK via AES-256-GCM with AAD. Oracle derives CWK on the fly, unwraps CEK at issuance time. Cell data never re-encrypted. New primitives in `flare/crypto.py`: `derive_cwk`, `generate_cek`, `wrap_cek`, `unwrap_cek`. Oracle core uses envelope path when wrapped CEKs are available, falls back to deprecated HKDF for backward compat. `BootstrapResult` carries `wrapped_ceks` for oracle injection. New `tests/test_envelope.py` (9 tests).
+
+**Containment edges + cross-context sharing (C-34, C-35).** `ContainmentEdge` type in `flare/types.py`. `LightConeGraph` extended with `containment_edges` dict + management methods. Bootstrap creates containment edges per cell. `share_cell_across_contexts` re-wraps a CEK under a different context's CWK. New `tests/test_containment.py` (4 tests).
+
+**Super-contexts (A-13).** New `flare/supercollections.py`: per-user KNN clustering over light-cone-visible centroids. Ephemeral, per-user, not stored. `SuperContext` dataclass with member cells and centroid. New `tests/test_super_contexts.py` (4 tests).
+
+**Paper:** New §3.10 covering all four concepts. §3.5 updated for CWK derivation note. §7 Limitations: two new bullets (CWK compromise scope, super-context verifiability).
+
+**Security register:** C-32 through C-35 (closed), A-12 and A-13 (accepted).
+
+**Test count:** 101 → 121 (20 new tests, all passing).

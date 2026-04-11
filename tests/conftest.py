@@ -252,6 +252,7 @@ def _build_stack() -> FlareStack:
         oracle_endpoints=alice_endpoints,
         vectors=av, ids=aids,
         master_key=alice_replicas.master_key,
+        ledger_client=ledger,
         nlist=4,
     )
     bob_result = bootstrap_context(
@@ -261,25 +262,36 @@ def _build_stack() -> FlareStack:
         oracle_endpoints=bob_endpoints,
         vectors=bv, ids=bids,
         master_key=bob_replicas.master_key,
+        ledger_client=ledger,
         nlist=4,
     )
 
-    # Inject encrypted centroids into every oracle replica so the
-    # /request-centroids endpoint can serve them to authorized queriers.
+    # Inject encrypted centroids and wrapped CEKs into every oracle
+    # replica so the /request-centroids endpoint can serve them to
+    # authorized queriers, and decide_batch can use envelope encryption.
     for app in alice_replicas.apps:
         app.state.core.store_encrypted_centroids(
             "workspace_alice", alice_result.encrypted_centroids,
         )
+        for cell_ref, wrapped in alice_result.wrapped_ceks.items():
+            app.state.core.store_wrapped_cek(cell_ref, wrapped)
     for app in bob_replicas.apps:
         app.state.core.store_encrypted_centroids(
             "workspace_bob", bob_result.encrypted_centroids,
         )
+        for cell_ref, wrapped in bob_result.wrapped_ceks.items():
+            app.state.core.store_wrapped_cek(cell_ref, wrapped)
 
     graph = LightConeGraph()
     graph.add_context("workspace_alice")
     graph.add_context("workspace_bob")
     graph.add_edge(Edge(alice.did, "workspace_alice", "owns"))
     graph.add_edge(Edge(bob.did, "workspace_bob", "owns"))
+    # Containment edges: explicit cell membership per context.
+    for edge in alice_result.containment_edges:
+        graph.add_containment_edge(edge)
+    for edge in bob_result.containment_edges:
+        graph.add_containment_edge(edge)
 
     engine = FlareQueryEngine(storage=storage, lightcone=graph, oracle_resolver=resolve)
 

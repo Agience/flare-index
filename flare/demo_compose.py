@@ -108,12 +108,14 @@ def main() -> None:
         owner_identity=alice_owner, oracle_endpoint=alice_url,
         oracle_did=alice_oracle_did,
         vectors=av, ids=aids, master_key=alice_master, nlist=8,
+        ledger_client=ledger,
     )
     bob_result = bootstrap_context(
         storage=storage, context_id="workspace_bob",
         owner_identity=bob_owner, oracle_endpoint=bob_url,
         oracle_did=bob_oracle_did,
         vectors=bv, ids=bids, master_key=bob_master, nlist=8,
+        ledger_client=ledger,
     )
     # Upload encrypted centroids to oracle services so they can
     # deliver them to authorized queriers via /request-centroids.

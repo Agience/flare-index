@@ -58,6 +58,7 @@ def main():
     master = fresh_master_key()
     oracle_id = Identity.generate()
     ledger_app = build_ledger_app()
+    ledger = HttpLedgerClient(client=TestClient(ledger_app))
     storage_app = build_storage_app()
     storage = HttpStorageClient(client=TestClient(storage_app))
     oracle_app = build_oracle_app(
@@ -74,10 +75,13 @@ def main():
         oracle_did=oracle_id.did,
         vectors=doc_vecs, ids=np.arange(len(doc_vecs), dtype=np.int64),
         master_key=master, nlist=NLIST,
+        ledger_client=ledger,
     )
     oracle_app.state.core.store_encrypted_centroids(
         CTX, bootstrap_result.encrypted_centroids,
     )
+    for cell_ref, wrapped in bootstrap_result.wrapped_ceks.items():
+        oracle_app.state.core.store_wrapped_cek(cell_ref, wrapped)
     graph = LightConeGraph()
     graph.add_context(CTX)
     graph.add_edge(Edge(owner.did, CTX, "owns"))

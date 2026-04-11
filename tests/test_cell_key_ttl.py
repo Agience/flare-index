@@ -18,6 +18,7 @@ from flare.wire import build_batch_request
 def test_oracle_response_carries_signed_ttl():
     """The valid_until_ns field is inside the AAD-bound canonical
     bytes, so any tampering breaks the response signature."""
+    from datetime import datetime as _dt
     ledger_app = build_ledger_app()
     ledger = HttpLedgerClient(client=TestClient(ledger_app))
     owner = Identity.generate()
@@ -26,6 +27,11 @@ def test_oracle_response_carries_signed_ttl():
         owner_did=owner.did, ledger_client=ledger, master_key=master,
     )
     c = TestClient(oracle_app)
+    # Grant-first: the owner's access flows through a self-grant.
+    ledger.add_grant(
+        grantor_identity=owner, grantee=owner.did,
+        context_id="ctx", issued_at=_dt(2000, 1, 1),
+    )
 
     materials = build_batch_request(owner, [("ctx", 0)])
     r = c.post("/issue-batch", json=materials.request.model_dump())

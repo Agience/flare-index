@@ -32,11 +32,15 @@ from typing import Optional
 import faiss  # type: ignore
 import numpy as np
 
-from .crypto import derive_cell_key, derive_centroid_key, encrypt_cell
+from .crypto import (
+    derive_cell_key, derive_centroid_key, derive_cwk,
+    encrypt_cell, generate_cek, unwrap_cek, wrap_cek,
+)
 from .identity import Identity
+from .ledger.client import GrantLedgerClient
 from .storage.client import StorageClient
 from .storage.memory import ContextRegistration, OracleEndpoint
-from .types import ContextId, PrincipalId
+from .types import CellRef, ContainmentEdge, ContextId, PrincipalId
 
 
 def _serialize_cell(vectors: np.ndarray, ids: np.ndarray) -> bytes:
@@ -68,6 +72,17 @@ class BootstrapResult:
     n_vectors: int
     n_cells: int
     encrypted_centroids: bytes = b""  # AES-GCM blob for oracle ingestion
+    # Envelope encryption: CWK-wrapped CEKs per cell, to be injected
+    # into oracle cores alongside encrypted centroids.
+    wrapped_ceks: dict = None  # type: ignore[assignment]  # dict[CellRef, bytes]
+    # Containment edges: explicit edges from context to cells.
+    containment_edges: list = None  # type: ignore[assignment]  # list[ContainmentEdge]
+
+    def __post_init__(self) -> None:
+        if self.wrapped_ceks is None:
+            self.wrapped_ceks = {}
+        if self.containment_edges is None:
+            self.containment_edges = []
 
 
 def bootstrap_context(
@@ -84,6 +99,10 @@ def bootstrap_context(
     oracle_endpoint: Optional[str] = None,
     oracle_did: Optional[PrincipalId] = None,
     oracle_endpoints: Optional[list[OracleEndpoint]] = None,
+    # Grant-first access: when provided, bootstrap creates a standing
+    # self-grant so the owner's access flows through the ledger like
+    # everyone else's — no fast-path bypass.
+    ledger_client: Optional[GrantLedgerClient] = None,
     nlist: int = 8,
     seed: int = 0,
 ) -> BootstrapResult:
@@ -132,6 +151,25 @@ def bootstrap_context(
         owner_identity=owner_identity,
     )
 
+    # Grant-first: create a standing self-grant so the owner's access
+    # is mediated by the ledger, not by an oracle bypass.
+    if ledger_client is not None:
+        from datetime import datetime
+        ledger_client.add_grant(
+            grantor_identity=owner_identity,
+            grantee=owner_identity.did,
+            context_id=context_id,
+            issued_at=datetime(2000, 1, 1),
+        )
+
+    # Envelope encryption: derive CWK once for the context, then
+    # generate a random CEK per cell, encrypt with CEK, wrap CEK
+    # under CWK. The wrapped CEKs are returned in BootstrapResult
+    # for oracle injection.
+    cwk = derive_cwk(master_key, context_id)
+    wrapped_ceks: dict[CellRef, bytes] = {}
+    edges: list[ContainmentEdge] = []
+
     n_cells = 0
     for cid in range(nlist):
         mask = assign == cid
@@ -140,13 +178,19 @@ def bootstrap_context(
         cell_vectors = vectors[mask]
         cell_ids = ids[mask]
         blob = _serialize_cell(cell_vectors, cell_ids)
-        cell_key = derive_cell_key(master_key, context_id, cid)
         aad = f"{context_id}:{cid}".encode("utf-8")
-        encrypted = encrypt_cell(cell_key, blob, associated=aad)
+        # Two-layer envelope: random CEK encrypts the cell,
+        # CWK wraps the CEK. The oracle derives CWK from the
+        # master key and unwraps to get the CEK.
+        cek = generate_cek()
+        encrypted = encrypt_cell(cek, blob, associated=aad)
+        wrapped = wrap_cek(cwk, cek, aad=aad)
         storage.put_cell(context_id, cid, encrypted.to_bytes(), owner_identity=owner_identity)
-        # Drop key reference promptly. ANALYSIS F-0.2 still applies.
-        del cell_key
+        wrapped_ceks[CellRef(context_id, cid)] = wrapped
+        edges.append(ContainmentEdge(context_id=context_id, cluster_id=cid))
+        del cek
         n_cells += 1
+    del cwk
 
     return BootstrapResult(
         context_id=context_id,
@@ -154,4 +198,35 @@ def bootstrap_context(
         n_vectors=n,
         n_cells=n_cells,
         encrypted_centroids=encrypted_centroids_blob,
+        wrapped_ceks=wrapped_ceks,
+        containment_edges=edges,
     )
+
+
+def share_cell_across_contexts(
+    *,
+    cell_ref: CellRef,
+    from_master_key: bytes,
+    to_master_key: bytes,
+    to_context_id: ContextId,
+    wrapped_cek: bytes,
+) -> tuple[bytes, ContainmentEdge]:
+    """Re-wrap a cell's CEK under a different context's CWK.
+
+    Returns the new wrapped CEK and a containment edge for the target
+    context. The encrypted cell data is NOT re-encrypted — only the
+    key wrapping changes. The caller must store the new wrapped CEK
+    in the target context's oracle and add the containment edge.
+    """
+    from_cwk = derive_cwk(from_master_key, cell_ref.context_id)
+    from_aad = f"{cell_ref.context_id}:{cell_ref.cluster_id}".encode("utf-8")
+    cek = unwrap_cek(from_cwk, wrapped_cek, aad=from_aad)
+    del from_cwk
+
+    to_cwk = derive_cwk(to_master_key, to_context_id)
+    to_aad = f"{to_context_id}:{cell_ref.cluster_id}".encode("utf-8")
+    new_wrapped = wrap_cek(to_cwk, cek, aad=to_aad)
+    del to_cwk, cek
+
+    edge = ContainmentEdge(context_id=to_context_id, cluster_id=cell_ref.cluster_id)
+    return new_wrapped, edge

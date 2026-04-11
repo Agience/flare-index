@@ -40,6 +40,7 @@ def test_owner_query_succeeds_with_full_quorum(flare_stack):
 
 def test_threshold_with_no_peers_denies():
     """A coordinator running K=2 with zero cooperating peers must deny."""
+    from datetime import datetime as _dt
     ledger_app = build_ledger_app()
     ledger = HttpLedgerClient(client=TestClient(ledger_app))
     owner = Identity.generate()
@@ -57,6 +58,13 @@ def test_threshold_with_no_peers_denies():
         oracle_identity=coord_id,
     )
     c = TestClient(app)
+    # Grant-first: the owner's access flows through a self-grant, so
+    # the ledger check passes and the denial comes from the threshold
+    # quorum failure, not from a missing grant.
+    ledger.add_grant(
+        grantor_identity=owner, grantee=owner.did,
+        context_id="ctx", issued_at=_dt(2000, 1, 1),
+    )
 
     from flare.wire import build_batch_request
     materials = build_batch_request(owner, [("ctx", 0)])

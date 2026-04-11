@@ -8,11 +8,11 @@
   "nlist": 32,
   "nprobe": 8,
   "plaintext_faiss_recall_at_k_vs_labels": 0.7883,
-  "plaintext_faiss_per_query_ms": 0.466,
+  "plaintext_faiss_per_query_ms": 1.245,
   "flare_recall_at_k_vs_labels": 0.7533,
   "flare_recall_at_k_vs_faiss": 0.927,
-  "flare_per_query_ms": 8.424,
-  "flare_overhead_ratio": 18.082,
-  "embedding_throughput_docs_per_s": 15.7,
+  "flare_per_query_ms": 40.017,
+  "flare_overhead_ratio": 32.136,
+  "embedding_throughput_docs_per_s": 10.6,
   "notes": "FLARE encrypted retrieval on BEIR SciFact preserves semantic retrieval quality vs the plaintext FAISS baseline. Both are embedded with all-MiniLM-L6-v2 and indexed with the same vectors; only the storage layer differs (per-cell HKDF + AES-256-GCM cells in FLARE, plaintext IndexFlatIP in FAISS)."
 }
