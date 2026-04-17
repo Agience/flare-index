@@ -864,6 +864,168 @@ underlying system.
 
 ---
 
+## Invention 8 — Single-Traversal Multi-Modal Authorization for Heterogeneous Encrypted Indexes ("FLARE-SSE")
+
+### Field
+
+Computer security; encrypted information retrieval combining
+approximate nearest neighbor search and lexical search under a shared
+authorization model.
+
+### Background
+
+Existing encrypted retrieval systems address either vector search or
+lexical search in isolation:
+
+- **SSE systems** (Song-Wagner-Perrig 2000; OXT, Cash et al. 2013;
+  Sophos/Diana, Bost 2016–2017) provide encrypted keyword search over
+  inverted indexes. They have no model for approximate nearest
+  neighbor search, no multi-owner authorization graph, and no notion
+  of authorization domening an index by graph reachability.
+
+- **Encrypted ANN systems** (e.g., FLARE Inventions 1–2) provide
+  partitioned encrypted vector search scoped by light-cone graph
+  authorization. They have no lexical index and cannot find documents
+  that are semantically distant but terminologically exact.
+
+When both indexes are deployed for the same corpus, existing approaches
+authorize them independently — two separate authorization checks, two
+separate key hierarchies, no shared scope computation. This creates two
+attack surfaces and a consistency risk: a document retrieval
+authorization from one index may diverge from the other.
+
+Additionally, in prior SSE schemes the blind token is used *only* to
+locate an encrypted posting list — the decryption key for that list is
+derived separately from the base SSE key. An adversary who obtains the
+SSE key can decrypt any posting list. In FLARE-SSE, the blind token
+also serves as the key derivation input: `HKDF(owner_sse_key,
+blind_token)`. Knowing the SSE key alone is insufficient — the
+adversary must also know (or recover) the plaintext term to derive the
+decryption key for any specific posting list.
+
+### Summary of the Invention
+
+A method and system for encrypted hybrid retrieval over heterogeneous
+encrypted indexes — an approximate nearest neighbor (ANN) vector index
+and a Searchable Symmetric Encryption (SSE) lexical index — sharing a
+single authorization traversal, comprising:
+
+1. **Single-traversal shared authorization scope.** A single
+   bounded breadth-first traversal (light-cone BFS, as in Invention 1)
+   is performed once per query, producing the set of authorized owner
+   identifiers. This scope is passed simultaneously to both the
+   encrypted ANN engine (Invention 2) and the encrypted SSE lexical
+   engine. No separate authorization check is required for either
+   index; both operate within the same scope boundary from a single
+   traversal.
+
+2. **Parallel fan-out to heterogeneous encrypted indexes.** After the
+   single BFS completes, the query engine fans out in parallel:
+
+   a. **ANN path**: centroid routing → per-cluster key derivation via
+      HKDF → AES-256-GCM cell decryption → FAISS ANN scoring. Keys
+      and authorization follow Inventions 1–2.
+
+   b. **SSE lexical path**: query terms are tokenized and stemmed;
+      per-owner blind tokens are generated (`HMAC-SHA256(owner_sse_key,
+      field_prefix + ":" + stemmed_term)`); posting lists are fetched
+      from S3 and decrypted; BM25 is computed in-process over the
+      decrypted data.
+
+   Both paths operate concurrently; neither blocks the other.
+
+3. **Blind-token-as-key-derivation-input.** For each SSE posting
+   list, the decryption key is derived as:
+
+       posting_key = HKDF(owner_sse_key, blind_token)
+
+   where `blind_token = HMAC-SHA256(owner_sse_key, field + ":" + term)`.
+   Since the blind token is both the storage address (filename in S3)
+   and the HKDF input for the posting list key, the blind token
+   derivation is non-invertible: knowing `owner_sse_key` alone is
+   insufficient to decrypt any specific posting list without also
+   knowing the plaintext term. Term knowledge is a cryptographic
+   prerequisite for posting list decryption.
+
+4. **Reciprocal Results Fusion (RRF) of heterogeneous scores.** The
+   ANN cosine similarity scores and the in-process BM25 scores are
+   fused using Reciprocal Rank Fusion:
+
+       score(d) = Σ_r  1 / (k + rank_r(d))
+
+   where r ∈ {ANN vector, SSE lexical}. The two indexes are
+   structurally complementary (SSE finds exact-term matches in
+   semantically distant documents; ANN finds semantically similar
+   documents the embedding model clusters together), so RRF fusion
+   over complementary retrieval signals consistently outperforms
+   either index alone with no redundant overlap in most queries.
+
+5. **Authorized-decoy padding for the SSE lookup plane.** Blind
+   token lookups are padded to a constant batch width with authorized
+   decoy tokens — tokens corresponding to terms in documents the
+   querier has grant access to (same authorized scope as the real
+   query). The storage server (S3) receives a fixed-width batch for
+   every SSE query regardless of the number of actual query terms.
+   All response data for decoy tokens is discarded after receipt.
+   This mirrors the constant-width cell-key padding of Invention 4
+   (Claim 2), applied to the SSE query plane.
+
+6. **Common key hierarchy.** Both indexes derive their keys from the
+   same owner master key via domain-separated HKDF context strings:
+   - ANN cell keys: `HKDF(master, "flare" || context_id || cluster_id)`
+   - SSE key: `HKDF(master, "sse")`
+   - SSE posting list key: `HKDF(SSE_key, blind_token)`
+   - Context field content key: `HKDF(master, "content" || artifact_id)`
+
+   The oracle issues both ANN cell keys and the SSE key through the
+   same threshold grant-gated protocol (Invention 3), under the same
+   grant ledger. A single revocation event immediately prevents
+   issuance of keys for both indexes.
+
+### Claims
+
+**Claim 1.** A computer-implemented method for authorized hybrid
+retrieval over heterogeneous encrypted indexes, comprising:
+
+(a) performing a single bounded breadth-first traversal of a typed
+    authorization graph from a querying principal to produce an
+    authorized scope comprising a set of owner identifiers;
+
+(b) passing the authorized scope to both an encrypted approximate
+    nearest neighbor (ANN) index engine and an encrypted lexical
+    index engine, wherein neither engine performs an independent
+    authorization traversal;
+
+(c) executing, in parallel:
+    (i) the ANN engine: decrypting indexed vector cells within the
+        authorized scope and computing approximate nearest neighbor
+        scores for the query vector;
+    (ii) the SSE lexical engine: generating per-owner blind tokens for
+        query terms, fetching and decrypting encrypted posting lists,
+        and computing BM25 scores in-process;
+
+(d) fusing the ANN scores and BM25 scores from step (c) using
+    Reciprocal Rank Fusion;
+
+(e) returning a unified ranked result list.
+
+**Claim 2.** The method of Claim 1, wherein, for each SSE posting
+list, the decryption key is derived as `HKDF(owner_sse_key,
+blind_token)`, where `blind_token = HMAC(owner_sse_key, field + ":"
++ term)`, so that (i) the blind token is both the posting list's
+storage address and the key derivation input, and (ii) decryption of
+any specific posting list requires knowledge of the corresponding
+plaintext term independent of possession of the SSE key.
+
+**Claim 3.** The method of Claim 1, further comprising authorized-decoy
+padding of the SSE blind token lookup batch, wherein the query engine
+augments the set of real query tokens with decoy tokens drawn from the
+querier's authorized term space to reach a constant batch width, so
+that the storage server cannot distinguish queries by the number of
+real query terms from the width of the token request batch.
+
+---
+
 ## Prior Art Differentiation
 
 The following table summarizes how the inventions described above
@@ -873,7 +1035,7 @@ differ from known prior art:
 |---|---|---|
 | RBAC / ABAC (Solid, traditional DBs) | Logical access control at query time | No physical encryption enforcement; compromised storage leaks data |
 | Attribute-Based Encryption (ABE) | Cryptographic enforcement via attribute policies | No graph-reachability model; no revocation without re-encryption; no vector search |
-| Searchable Symmetric Encryption (SSE) | Encrypted keyword search | No approximate nearest neighbor; no multi-owner model |
+| Searchable Symmetric Encryption (SSE) — OXT, Sophos/Diana | Encrypted keyword search over inverted index | No ANN; no multi-owner authorization graph; blind token used only for posting list lookup, not as key derivation input (knowing SSE key is sufficient to decrypt any posting list) |
 | Fully Homomorphic Encryption (FHE) | Computation on encrypted data | 1000–10,000× overhead; impractical for real-time ANN |
 | Private Information Retrieval (PIR) | Server-oblivious retrieval | O(n) server cost; no ANN support |
 | FAISS / Qdrant / Milvus / Weaviate | High-performance ANN search | Plaintext indexes; no per-partition encryption |
@@ -883,11 +1045,13 @@ differ from known prior art:
 | Shamir Secret Sharing (generic) | Threshold secret reconstruction | No per-request grant verification; no ECIES delivery; no cell-key derivation |
 | Google Zanzibar / SpiceDB | Graph-based authorization | No encryption enforcement; no per-partition keys; no path-predicate deny |
 | Topic modeling (LDA, BERTopic) | Global document clustering | Global (not per-user); leaks unauthorized data topology; requires plaintext |
+| Order-Preserving Encryption (OPE), Boldyreva et al. 2009 | Ciphertexts numerically ordered like plaintexts; supports `<`/`>` comparisons in DB | Leaks full rank order of every stored value; effectively equivalent to a linear transposition (fractional index) |
+| Order-Revealing Encryption (ORE), Lewi-Wu 2016 | Reveals only comparison bit (left < right), not magnitude | Requires custom DB comparison operator; not natively supported by ArangoDB AQL; reduces but does not eliminate ordering leakage |
 
 ## Conception History
 
 The inventions described herein were conceived by the named inventor
-over the period March 15, 2026 through April 11, 2026. Contemporaneous
+over the period March 15, 2026 through April 16, 2026. Contemporaneous
 records of conception include:
 
 - AI-assisted development session transcripts (VS Code Copilot and
@@ -905,6 +1069,10 @@ records of conception include:
   super-context concepts prior to implementation.
 - The LinkedIn post dated April 8, 2026 disclosing the FLARE system
   at a high level.
+- The design document "FLARE-SSE — Encrypted Lexical Search"
+  (dated April 16, 2026), which describes the blind-token lexical
+  index, single-traversal multi-modal authorization, and
+  authorized-decoy padding concepts prior to implementation.
 - Git commit history for the FLARE repository showing implementation
   of each invention.
 

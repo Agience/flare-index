@@ -67,9 +67,8 @@ def test_grant_then_query_then_revoke(phase1_stack):
     assert any(c.context_id == "workspace_alice" for c in atrace.oracle_denied)
 
 
-def test_deny_edge_blocks_authorized_path(phase1_stack):
+def test_null_propagate_blocks_authorized_path(phase1_stack):
     s = phase1_stack
-    s.graph.add_edge(Edge(s.bob.did, "workspace_alice", "granted"))
-    s.graph.add_edge(Edge(s.bob.did, "workspace_alice", "deny", allow=False))
+    s.graph.add_edge(Edge(s.bob.did, "workspace_alice", "granted", propagate=None))
     hits, _ = s.engine.search(s.bob, s.av[0], k=5, nprobe=8, now=T0)
     assert all(h.context_id != "workspace_alice" for h in hits)

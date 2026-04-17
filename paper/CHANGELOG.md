@@ -2,6 +2,34 @@
 
 This file tracks user-visible changes to `paper/flare.md`. The paper is the canonical description of FLARE; this changelog records what changed and why so a reviewer comparing two versions has a quick map.
 
+## v1.3 — 2026-04-16 — Propagation-mask authorization model
+
+The light-cone authorization model in §3.3 is updated to propagation masks. Edge-level deny is replaced by per-edge `propagate` sets; the model is now default-deny and positive-only throughout.
+
+**Paper changes:**
+
+- §1 Introduction bullet 1: "edge-level and path-predicate deny semantics" → "propagation-mask and path-predicate constraint semantics".
+- §3.2 data flow diagram label: "BFS reachability + path-predicate deny" → "light-cone BFS + propagation masks".
+- §3.3 Light-cone authorization: three-form description rewritten. Replace "edge-level deny" with "propagation masks" (per-edge permission ceiling frozenset). Replace "path-predicate deny" / `DenyPath` with "path-predicate constraints" / `PathConstraint`. Item 1 clarified: "allow edges" means edges explicitly added to the graph; no edge = no traversal. The BFS question changes from "no traversal through a denied transition" to "reachable through propagating edges". The effective-permission formula is added.
+- §3.7 Grant ledger: new paragraph explicitly states the ledger is positive-only (grants and revocations only, no deny entries), and that the oracle's check is a single "does a valid grant exist?" lookup. Links framing to the propagation-mask model.
+- §4.6 Constant-width batches: "padding with denied cells" → "drawing from cells the principal cannot reach" (no deny semantics in the new model).
+- §6 Security summary bullet: "edge-level and path-predicate deny" → "propagation masks and path-predicate constraints — positive-only, default-deny".
+- §5.3 test table: rows for "Edge-level deny" and "Path-predicate deny" updated to "Propagation masks" and "Path-predicate constraints".
+
+**Design spec:** `docs/propagation-mask-authorization.md` is the canonical design reference (promoted from Proposal to Design).
+
+**Implementation pending:** ~~`flare/lightcone.py`, `tests/test_lightcone.py`, and `tests/test_path_predicates.py` still use the old `Edge.allow` / `DenyPath` API.~~ **Done** — implementation updated in the same pass (see below).
+
+## v1.3 implementation — lightcone.py + tests + CRUDEASIO
+
+- `flare/lightcone.py`: `Edge.allow: bool` → `Edge.propagate: frozenset[str] | None`; `ALL_PERMS = frozenset("CRUDEASIO")` module constant; `DenyPath` → `PathConstraint`; `LightConeGraph.deny_edges_by_pair` and `_is_transition_denied` removed; `deny_paths` → `path_constraints`; `add_deny_path` → `add_path_constraint`; `_path_denied` → `_path_constrained`; `authorized_contexts` and `explain` gain `requested_permission: str = "R"` parameter; BFS traversal filter changed to `edge.propagate is None` / `requested_permission not in edge.propagate`.
+- `tests/test_lightcone.py`: edge-level deny tests replaced with propagation-mask tests (`test_null_propagate_mask_excludes_principal`, `test_null_propagate_on_intermediate_blocks_all_traversal`, `test_narrow_propagate_mask_respected`).
+- `tests/test_path_predicates.py`: `DenyPath` → `PathConstraint`, `add_deny_path` → `add_path_constraint` throughout; test docstrings updated.
+- `tests/test_end_to_end.py`: `test_deny_edge_blocks_authorized_path` → `test_null_propagate_blocks_authorized_path`; `allow=False` → `propagate=None`.
+- `docs/propagation-mask-authorization.md`: CRUDIASO → CRUDEASIO; permission table updated (E=Evict, A=Add, O=Own/admin; old A=Admin removed); all permission-set examples updated.
+- `docs/analysis/security.md`: C-14/C-15 updated to propagation-mask API.
+- `docs/production-deployment.md`: ArangoLightConeGraph API description updated.
+
 ## v1.0 — 2026-04-08 — Single coherent product description
 
 The paper is now structured around the finished FLARE system rather than the development order. All "Phase N" framing has been removed from the paper, the README, the consolidated `security.md`, and the in-code docstrings. The per-phase findings files (`phase0-findings.md` … `phase4-findings.md`) are kept as historical changelogs but `docs/analysis/security.md` is the canonical risk register.

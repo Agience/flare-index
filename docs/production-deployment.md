@@ -119,13 +119,12 @@ unchanged.
 
 ### 2. Light-cone graph (`flare/lightcone.py`)
 
-`LightConeGraph` exposes three mutating methods (`add_edge`, `add_deny`,
-`add_deny_path`) and one query method (`authorized_contexts`). Implement an
+`LightConeGraph` exposes two mutating methods (`add_edge`,
+`add_path_constraint`) and one query method (`authorized_contexts`). Implement an
 `ArangoLightConeGraph` backed by the ArangoDB graph API:
 
-- `add_edge(src, dst, type)` → insert edge document `{_from, _to, type, deny: false}`
-- `add_deny(src, dst)` → insert edge document `{_from, _to, deny: true}`
-- `authorized_contexts(principal, k)` → execute AQL traversal, return set of context IDs
+- `add_edge(src, dst, type, propagate={...})` → insert edge document `{_from, _to, type, propagate: [...]}`
+- `authorized_contexts(principal, k, requested_permission)` → execute AQL traversal filtering on `propagate`, return set of context IDs
 
 The existing in-memory implementation stays as the test double and single-
 process fallback.

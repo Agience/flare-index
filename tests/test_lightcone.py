@@ -1,6 +1,7 @@
 """Light-cone graph tests.
 
-The graph models structural reachability through allow/deny edges.
+The graph models structural reachability through propagating edges
+and path-predicate constraints.
 """
 from flare.lightcone import Edge, LightConeGraph
 
@@ -40,33 +41,39 @@ def test_remove_edge_drops_reachability():
     assert g.authorized_contexts("alice") == set()
 
 
-# ----- edge-level deny -----
+# ----- propagation masks -----
 
 
-def test_edge_level_deny_blocks_only_targeted_principal():
-    """A deny edge alice->ws_a does NOT block bob->ws_a."""
+def test_null_propagate_mask_excludes_principal():
+    """An edge with propagate=None carries no authorization; the principal
+    cannot reach the destination via that edge. Other principals with
+    propagating edges are unaffected."""
     g = _g()
-    g.add_edge(Edge("alice", "ws_a", "granted"))
+    g.add_edge(Edge("alice", "ws_a", "granted", propagate=None))
     g.add_edge(Edge("bob", "ws_a", "granted"))
-    g.add_edge(Edge("alice", "ws_a", "deny", allow=False))
-
     assert "ws_a" not in g.authorized_contexts("alice")
     assert "ws_a" in g.authorized_contexts("bob")
 
 
-def test_deny_on_intermediate_edge_blocks_path_through_it():
-    """A deny on group1->ws_a blocks every principal whose only route
-    is via group1, while leaving direct grants intact."""
+def test_null_propagate_on_intermediate_blocks_all_traversal():
+    """propagate=None on an intermediate edge blocks all traversal through
+    it regardless of who tries, while direct edges on other principals work."""
     g = _g()
     g.add_edge(Edge("alice", "group1", "member"))
     g.add_edge(Edge("bob", "group1", "member"))
-    g.add_edge(Edge("group1", "ws_a", "owns"))
+    g.add_edge(Edge("group1", "ws_a", "owns", propagate=None))
     g.add_edge(Edge("carol", "ws_a", "granted"))
-    g.add_edge(Edge("group1", "ws_a", "deny", allow=False))
-
     assert "ws_a" not in g.authorized_contexts("alice")
     assert "ws_a" not in g.authorized_contexts("bob")
     assert "ws_a" in g.authorized_contexts("carol")
+
+
+def test_narrow_propagate_mask_respected():
+    """An edge propagating only {R} does not authorize other permissions."""
+    g = _g()
+    g.add_edge(Edge("alice", "ws_a", "link", propagate=frozenset("R")))
+    assert "ws_a" in g.authorized_contexts("alice", requested_permission="R")
+    assert "ws_a" not in g.authorized_contexts("alice", requested_permission="I")
 
 
 def test_explain_returns_a_path():
@@ -79,6 +86,5 @@ def test_explain_returns_a_path():
 
 def test_explain_returns_none_when_blocked():
     g = _g()
-    g.add_edge(Edge("alice", "ws_a", "granted"))
-    g.add_edge(Edge("alice", "ws_a", "deny", allow=False))
+    g.add_edge(Edge("alice", "ws_a", "granted", propagate=None))
     assert g.explain("alice", "ws_a") is None

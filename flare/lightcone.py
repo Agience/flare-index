@@ -4,33 +4,34 @@ The light cone projects the set of contexts visible to a principal
 through structural relationships in a typed multigraph. It answers
 exactly one question:
 
-    Given principal P, which context_ids are reachable through an
-    allowed path, with no traversal through a denied transition or a
-    denied path, within K hops?
+    Given principal P, which context_ids are reachable through
+    propagating edges, with no traversal through a constrained path,
+    within K hops?
 
 The graph supports three forms of access control, in increasing order
 of expressiveness:
 
-1. **Allow edges** are the only edges BFS will traverse.
+1. **Allow edges** — only edges explicitly added to the graph are
+   traversed. No edge means no traversal.
 
-2. **Edge-level deny** — a deny `Edge(X, Y)` prunes the specific
-   transition X -> Y for everyone, leaving other paths to Y intact.
+2. **Propagation masks** — each edge carries a `propagate` field: a
+   frozenset of permission strings from CRUDEASIO that the edge allows
+   to flow through. BFS follows the edge only if the mask includes the
+   requested permission. `propagate=None` means the edge is a
+   structural reference that carries no authorization.
 
-3. **Path-predicate deny** — a `PathPredicate` is a constraint on the
-   *full path* from the principal to a candidate context. The most
-   useful predicate is `RequireAllOf({A, B})`: deny if the path
-   traverses every node in the set. This expresses things like "deny
-   any path that goes through both legacy_group AND ws_a", which
-   edge-level deny cannot capture without enumerating every concrete
-   transition. Predicates are evaluated against the path that BFS
-   has accumulated so far; a candidate path that satisfies a deny
+3. **Path-predicate constraints** — a `PathConstraint` is a condition
+   over the full path from the principal to a candidate context. The
+   most useful predicate is `RequireAllOf({A, B})`: block if the path
+   traverses every node in the set. Predicates are evaluated against
+   the path BFS has accumulated so far; a path that matches the
    predicate's `matches` method is dropped.
 
 Path-predicate evaluation makes BFS path-stateful: each frontier
-element carries the set of nodes visited along the path that reached
-it, not just the final node. This is bounded by the hop limit K, so
-the cost stays linear in K * (frontier width). Cycles are blocked
-because we never expand a node we've already added to the path.
+element carries the nodes visited along the path that reached it, not
+just the final node. This is bounded by the hop limit K, so the cost
+stays linear in K * (frontier width). Cycles are blocked because we
+never expand a node we've already added to the path.
 """
 from __future__ import annotations
 
@@ -42,20 +43,23 @@ from .types import ClusterId, ContainmentEdge, ContextId, PrincipalId
 
 NodeId = str  # principals and contexts share a namespace
 
+# CRUDEASIO permission set: Create, Read, Update, Delete, Evict, Add, Share, Invoke, Own
+ALL_PERMS: frozenset[str] = frozenset("CRUDEASIO")
+
 
 class PathPredicate(Protocol):
     """A constraint on a candidate path.
 
-    `matches(path)` returns True iff the predicate's deny condition
-    is satisfied by the given path. The light cone drops any
-    reachability whose path matches an active deny predicate.
+    `matches(path)` returns True iff the constraint's blocking condition
+    is satisfied by the given path. The light cone drops any reachability
+    whose path matches an active path constraint.
     """
     def matches(self, path: list[NodeId]) -> bool: ...
 
 
 @dataclass(frozen=True)
 class RequireAllOf:
-    """Deny if every node in `nodes` appears anywhere in the path."""
+    """Block if every node in `nodes` appears anywhere in the path."""
     nodes: frozenset[NodeId]
 
     def matches(self, path: list[NodeId]) -> bool:
@@ -64,7 +68,7 @@ class RequireAllOf:
 
 @dataclass(frozen=True)
 class RequireSequence:
-    """Deny if `nodes` appear as a (not necessarily contiguous)
+    """Block if `nodes` appear as a (not necessarily contiguous)
     subsequence of the path. Useful for 'A then B then C' rules."""
     nodes: tuple[NodeId, ...]
 
@@ -74,12 +78,12 @@ class RequireSequence:
 
 
 @dataclass(frozen=True)
-class DenyPath:
-    """A deny rule scoped to a target context with a path predicate.
+class PathConstraint:
+    """A path constraint scoped to a target context.
 
-    `target` is the context the rule protects. `predicate` decides
-    whether a candidate path that would otherwise reach `target`
-    should be dropped. If `target` is None, the rule applies to every
+    `target` is the context the constraint protects. `predicate` decides
+    whether a candidate path that would otherwise reach `target` should
+    be dropped. If `target` is None, the constraint applies to every
     context (rare; included for symmetry).
     """
     predicate: PathPredicate
@@ -91,15 +95,14 @@ class Edge:
     src: NodeId
     dst: NodeId
     edge_type: str
-    allow: bool = True  # False => deny
+    propagate: frozenset[str] | None = ALL_PERMS
 
 
 @dataclass
 class LightConeGraph:
     out_edges: dict[NodeId, list[Edge]] = field(default_factory=dict)
     context_nodes: set[NodeId] = field(default_factory=set)
-    deny_edges_by_pair: dict[tuple[NodeId, NodeId], list[Edge]] = field(default_factory=dict)
-    deny_paths: list[DenyPath] = field(default_factory=list)
+    path_constraints: list[PathConstraint] = field(default_factory=list)
     # Containment: explicit edges from contexts to cells. When present,
     # the query engine uses these to resolve cells instead of enumerating
     # range(nlist). Enables cross-context sharing.
@@ -110,11 +113,9 @@ class LightConeGraph:
 
     def add_edge(self, edge: Edge) -> None:
         self.out_edges.setdefault(edge.src, []).append(edge)
-        if not edge.allow:
-            self.deny_edges_by_pair.setdefault((edge.src, edge.dst), []).append(edge)
 
-    def add_deny_path(self, deny: DenyPath) -> None:
-        self.deny_paths.append(deny)
+    def add_path_constraint(self, constraint: PathConstraint) -> None:
+        self.path_constraints.append(constraint)
 
     # ---- Containment edges (context → cells) ----
 
@@ -134,19 +135,9 @@ class LightConeGraph:
         edges = self.out_edges.get(edge.src, [])
         if edge in edges:
             edges.remove(edge)
-        if not edge.allow:
-            pair = (edge.src, edge.dst)
-            denies = self.deny_edges_by_pair.get(pair, [])
-            if edge in denies:
-                denies.remove(edge)
-                if not denies:
-                    self.deny_edges_by_pair.pop(pair, None)
 
-    def _is_transition_denied(self, src: NodeId, dst: NodeId) -> bool:
-        return bool(self.deny_edges_by_pair.get((src, dst)))
-
-    def _path_denied(self, target: NodeId, candidate_path: list[NodeId]) -> bool:
-        for rule in self.deny_paths:
+    def _path_constrained(self, target: NodeId, candidate_path: list[NodeId]) -> bool:
+        for rule in self.path_constraints:
             if rule.target is not None and rule.target != target:
                 continue
             if rule.predicate.matches(candidate_path):
@@ -157,13 +148,14 @@ class LightConeGraph:
         self,
         principal: PrincipalId,
         max_hops: int = 4,
+        requested_permission: str = "R",
     ) -> set[ContextId]:
         # Path-stateful BFS. Each frontier element carries the full
-        # path that reached it, so path-predicate deny rules can be
+        # path that reached it, so path-predicate constraints can be
         # evaluated against it. Bounded by max_hops; cycles are
         # blocked because we never expand a node already in the path.
         reached: set[NodeId] = set()
-        if principal in self.context_nodes and not self._path_denied(principal, [principal]):
+        if principal in self.context_nodes and not self._path_constrained(principal, [principal]):
             reached.add(principal)
         frontier: deque[tuple[NodeId, tuple[NodeId, ...]]] = deque(
             [(principal, (principal,))]
@@ -173,14 +165,14 @@ class LightConeGraph:
             if len(path) - 1 >= max_hops:
                 continue
             for edge in self.out_edges.get(node, []):
-                if not edge.allow:
+                if edge.propagate is None:
                     continue
-                if self._is_transition_denied(edge.src, edge.dst):
+                if requested_permission not in edge.propagate:
                     continue
                 if edge.dst in path:  # cycle
                     continue
                 next_path = path + (edge.dst,)
-                if self._path_denied(edge.dst, list(next_path)):
+                if self._path_constrained(edge.dst, list(next_path)):
                     continue
                 if edge.dst in self.context_nodes:
                     reached.add(edge.dst)
@@ -192,8 +184,9 @@ class LightConeGraph:
         principal: PrincipalId,
         target: ContextId,
         max_hops: int = 4,
+        requested_permission: str = "R",
     ) -> Optional[list[NodeId]]:
-        """Return one allowed path principal -> target, or None."""
+        """Return one propagating path principal -> target, or None."""
         if principal == target:
             return [principal]
         frontier: deque[tuple[NodeId, tuple[NodeId, ...]]] = deque(
@@ -204,14 +197,14 @@ class LightConeGraph:
             if len(path) - 1 >= max_hops:
                 continue
             for edge in self.out_edges.get(node, []):
-                if not edge.allow:
+                if edge.propagate is None:
                     continue
-                if self._is_transition_denied(edge.src, edge.dst):
+                if requested_permission not in edge.propagate:
                     continue
                 if edge.dst in path:
                     continue
                 next_path = path + (edge.dst,)
-                if self._path_denied(edge.dst, list(next_path)):
+                if self._path_constrained(edge.dst, list(next_path)):
                     continue
                 if edge.dst == target:
                     return list(next_path)

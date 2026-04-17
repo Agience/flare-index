@@ -13,7 +13,7 @@ The privacy gap in modern semantic search is structural. Vector databases store 
 
 FLARE makes three combined claims that we know of no existing system to combine over a semantic vector index:
 
-1. **Authorization as graph reachability.** A principal's authorized set is computed as the contexts reachable from them in a typed graph (the *light cone*), with edge-level and path-predicate deny semantics that express constraints standard role/group ACLs cannot.
+1. **Authorization as graph reachability.** A principal's authorized set is computed as the contexts reachable from them in a typed graph (the *light cone*), with propagation-mask and path-predicate constraint semantics that express access ceilings and structural constraints standard role/group ACLs cannot.
 2. **Physical enforcement.** Each cluster cell of an IVF vector index is encrypted under a per-cell key derived from its owner's symmetric master key via HKDF-SHA256, with `(context_id || cluster_id)` as the AAD on AES-256-GCM. Without an oracle-issued cell key the cell is noise.
 3. **Owner-delegated, threshold key issuance.** Each data owner runs a Shamir K-of-M oracle quorum that holds shares of the master key, checks a public Ed25519-signed grant ledger, and issues short-lived cell keys on demand inside an end-to-end-authenticated envelope. Revocation is a single signed ledger entry; no re-encryption.
 
@@ -80,7 +80,7 @@ sequenceDiagram
     participant L as Light Cone
     participant O as Oracle Quorum (Alice's K-of-M)
     participant SD as Encrypted Cells
-    U->>L: BFS reachability + path-predicate deny
+    U->>L: light-cone BFS + propagation masks
     L-->>U: authorized context set
     U->>O: POST /request-centroids (ECIES + Ed25519)
     O->>O: ledger check + decrypt centroid blob
@@ -100,15 +100,18 @@ sequenceDiagram
 
 The light cone projects, for a given principal, the set of contexts visible through structural relationships in a typed multigraph. It answers exactly one question:
 
-> Given principal `P`, which `context_id`s are reachable through an allowed path, with no traversal through a denied transition or a denied path, within `K` hops?
+> Given principal `P`, which `context_id`s are reachable through propagating edges, with no traversal through a constrained path, within `K` hops?
 
 The graph supports three forms of access control, in increasing order of expressiveness:
 
-1. **Allow edges** are the only edges BFS will traverse.
-2. **Edge-level deny** — a deny `Edge(X, Y)` prunes the specific transition X→Y for everyone, leaving other paths to Y intact. Useful for "Bob is denied direct access but may still reach `ws_a` through group1" or "members of `legacy_group` cannot reach `ws_a` while others can."
-3. **Path-predicate deny** — a `DenyPath(predicate, target)` carries a constraint over the *full path* from the principal to a candidate context. The predicates currently provided are `RequireAllOf(nodes)` (deny if every node in the set appears anywhere in the path) and `RequireSequence(nodes)` (deny if the nodes appear as a subsequence). Path predicates express things edge-level deny cannot, e.g. "deny any path that traverses both `legacy_group` AND `audit_group` on its way to `ws_a`, but allow paths that traverse only one of them."
+1. **Allow edges** are the only edges BFS will traverse. The BFS only ever follows structural edges explicitly added to the graph; no edge means no traversal.
+2. **Propagation masks.** Each edge carries a `propagate` field — a set of permission types (from `{C,R,U,D,E,A,S,I,O}`) that the edge allows to flow through. BFS follows an edge only if the mask includes the requested permission. A `None` mask means the edge is a structural reference that does not propagate access. The model is default-deny and positive-only: edges declare what CAN flow, not what is blocked. The effective inherited permission at any node is:
 
-BFS is path-stateful: each frontier element carries the full path that reached it, so a candidate that satisfies a deny predicate is dropped before it enters the reached set. Cycles are blocked because a node is not expanded if it already appears in its own path. Cost is bounded by the hop limit `K`. Implemented in `flare/lightcone.py`; the property set is pinned by `tests/test_lightcone.py` and `tests/test_path_predicates.py`.
+$$\text{effective} = \bigcap_{e \in \text{path}} e.\text{propagate} \cap \text{grant}(P, \text{root})$$
+
+3. **Path-predicate constraints.** A `PathConstraint(predicate, target)` carries a condition over the *full path* from the principal to a candidate context. The predicates provided are `RequireAllOf(nodes)` (block if every node in the set appears anywhere in the path) and `RequireSequence(nodes)` (block if the nodes appear as a subsequence). Path constraints express things propagation masks cannot, e.g. "block any path that traverses both `legacy_group` AND `audit_group` on its way to `ws_a`, but allow paths that traverse only one of them."
+
+BFS is path-stateful: each frontier element carries the full path that reached it, so a candidate that satisfies a path constraint is dropped before it enters the reached set. Cycles are blocked because a node is not expanded if it already appears in its own path. Cost is bounded by the hop limit `K`. Implemented in `flare/lightcone.py`; the property set is pinned by `tests/test_lightcone.py` and `tests/test_path_predicates.py`.
 
 ### 3.4 Partitioned encrypted IVF
 
@@ -180,6 +183,8 @@ sequenceDiagram
 ### 3.7 Grant ledger
 
 The ledger is a public, append-only, hash-chained log of signed grants. Every grant carries an Ed25519 signature from the grantor over canonical bytes; every revocation carries one from the *original* grantor over `(grant_id, revoked_at)`. The ledger service rejects unsigned and wrong-signed writes. Every state change appends an entry whose hash is `sha256(prev_hash || sha256(canonical_entry))`, walking back to a fixed `GENESIS_HASH`. The chain head is exposed at `GET /head` so external auditors can pin it; tampering with any historical entry breaks the chain.
+
+The ledger is positive-only: it records grants and revocations of grants. There are no deny entries, no negative grants, no priority between competing rules. The oracle's authorization check is a single lookup: does a valid, non-revoked, non-expired grant exist for this `(requester, context)`? Absence of a grant is denial. This aligns with the propagation-mask model in the light cone — both layers are positive-only and default-deny.
 
 This is a software substitute for an on-chain ledger. The schema and signature primitives are identical to what a Ceramic / Ethereum L2 deployment would use; the missing piece is consensus. Replacing the in-memory backing with a real chain is a swap of the storage layer below `flare/ledger/memory.py` — the grant-signing and verification primitives, the oracle lookup path, and the query engine are unchanged.
 
@@ -356,7 +361,7 @@ This is **not** a TEE. The on-disk artifact is encrypted; the in-memory buffer w
 
 The query engine pads every oracle batch to a fixed width with random already-authorized cells whose keys are received but discarded. The padded cells are *also* `granted` from the oracle's perspective (the principal has a valid grant), so the request stream is constant-width AND constant-content (every cell is granted) regardless of how many cells the query actually needs. An observer of the oracle wire stream cannot infer query specificity from batch size.
 
-The pool deliberately uses authorized cells, not unauthorized ones — padding with denied cells would leak the granted/denied distribution itself. The remaining leak (which contexts a principal queries) is an inherent consequence of per-context oracles and is documented as out-of-scope in the threat model.
+The pool deliberately uses authorized cells, not unauthorized ones — drawing from cells the principal cannot reach would itself leak information about the granted/not-granted distribution. The remaining leak (which contexts a principal queries) is an inherent consequence of per-context oracles and is documented as out-of-scope in the threat model.
 
 ### 4.7 Multi-endpoint registration with failover
 
@@ -446,8 +451,8 @@ The 101-test pytest suite covers every security property the paper claims. Selec
 | Wire batch: an entry whose TTL has passed at decode time returns None | `tests/test_wire_batch.py::test_expired_ttl_returns_none` |
 | Owner sees own data; unauthorized principal sees nothing | `tests/test_end_to_end.py::test_owner_sees_own_data`, `test_unauthorized_principal_sees_nothing` |
 | Grant illuminates a context; revocation hides it again with no re-encryption | `tests/test_end_to_end.py::test_grant_then_query_then_revoke` |
-| Edge-level deny: blocks one principal, leaves others' direct grants intact | `tests/test_lightcone.py::test_edge_level_deny_*` |
-| Path-predicate deny: blocks paths through a denied node-set; alternate paths survive | `tests/test_path_predicates.py::test_require_all_of_*` |
+| Propagation masks: an edge with `propagate={"R"}` does not propagate write/invoke permissions; a `None`-mask edge carries no authorization | `tests/test_lightcone.py::test_null_propagate_*`, `test_narrow_*` |
+| Path-predicate constraints: blocks paths through a constrained node-set; alternate paths survive | `tests/test_path_predicates.py::test_require_all_of_*` |
 | Shamir: K of M shares reconstruct the secret; K-1 do not | `tests/test_threshold_shamir.py::*` |
 | Threshold oracle denies the whole batch when K-1 peers do not cooperate | `tests/test_threshold_oracle.py::test_threshold_with_no_peers_denies` |
 | Peer oracle independently re-checks the ledger before releasing its share | `tests/test_threshold_oracle.py::test_peer_refuses_share_release_for_unauthorized_requester` |
@@ -499,7 +504,7 @@ The full risk register is `docs/analysis/security.md`. The headline state of the
 - Every oracle batch is **constant-width via authorized padding**, so the oracle wire stream does not leak query specificity.
 - Peer share release uses an **independent ledger check** at every peer.
 - Identities are method-agnostic: both **`did:key`** and **`did:web`** resolve through the same `DIDResolver`.
-- The light cone supports **edge-level and path-predicate deny**.
+- The light cone uses **propagation masks and path-predicate constraints** — positive-only, default-deny; no deny edges, no deny records anywhere.
 - Revocation is **immediate for every subsequent request**, pinned by an eight-thread stress test.
 
 ## 7. Limitations
